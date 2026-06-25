@@ -1,0 +1,85 @@
+# Twenty CRM — Saldo platform Helm values (crm.saldo.chat)
+#
+# Deployed with the official in-repo chart: packages/twenty-docker/helm/twenty
+# Mirrors the live Chatwoot deploy model on the same k3s VPS:
+#   Traefik ingress + cert-manager (ClusterIssuer letsencrypt-prod) + Let's Encrypt TLS.
+#
+# This file contains NO secrets. The chart auto-generates the PostgreSQL app
+# password and the app/access token into in-cluster Secrets, so nothing
+# sensitive needs to live here or on git. See deploy/README.md for the runbook.
+#
+# Namespace is chosen at install time: `helm ... -n twenty --create-namespace`.
+# The internal PostgreSQL and Redis are plain in-namespace Deployments, so they
+# land in the `twenty` namespace alongside the app (NOT in chatwoot's namespace).
+
+# Deterministic resource names: twenty-server, twenty-db, twenty-redis, ...
+fullnameOverride: twenty
+
+image:
+  repository: twentycrm/twenty
+  # Pin to the chart's appVersion. Never run "latest" in production — an
+  # unattended image change could break a running instance on pod restart.
+  tag: "v1.14.0"
+
+# Local on-disk attachment storage (single-node k3s, local-path PVC).
+# S3 is the recommended future move once we outgrow one web replica.
+storage:
+  type: local
+
+server:
+  env:
+    # Set SERVER_URL explicitly. If left empty, the chart derives it from the
+    # ingress host and appends an explicit ":443" (https://crm.saldo.chat:443),
+    # which leaks into generated links and can break OAuth/redirect flows.
+    SERVER_URL: "https://crm.saldo.chat"
+    SIGN_IN_PREFILLED: "false"
+
+  ingress:
+    enabled: true
+    # k3s ships Traefik as the default ingress controller (not nginx).
+    className: traefik
+    # acme: true makes the chart add
+    #   cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # which matches the existing ClusterIssuer already used by Chatwoot.
+    acme: true
+    hosts:
+      - host: crm.saldo.chat
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: twenty-tls
+        hosts:
+          - crm.saldo.chat
+
+  # Attachments / local storage volume.
+  persistence:
+    enabled: true
+    size: 10Gi
+
+# Internal PostgreSQL (pgvector-enabled spilo image) — in the `twenty` namespace.
+db:
+  enabled: true
+  internal:
+    # The chart's default tag (3.3-p2) does NOT exist on Docker Hub and causes
+    # ImagePullBackOff. Pin a real published tag of twentycrm/twenty-postgres-spilo
+    # (PostgreSQL 16 + pgvector). v0.43.5 is the newest at deploy time.
+    image:
+      tag: "v0.43.5"
+    # Pin a clean ALPHANUMERIC app password (set at deploy time via
+    # `--set db.internal.appPassword=...`, kept out of git). If left empty the
+    # chart generates a random one that may contain special chars (+,/,=) which
+    # break the postgres:// connection URL -> "password authentication failed".
+    # appPassword: "<set via --set, e.g. openssl rand -hex 16>"
+    persistence:
+      enabled: true
+      size: 10Gi
+
+# Internal Redis — in the `twenty` namespace.
+redisInternal:
+  enabled: true
+  # Persistence OFF (chart default). Redis here is only a cache/job-queue; losing
+  # it on restart is acceptable, and a RWO PVC on this Deployment deadlocks every
+  # redeploy (old pod holds the volume, new pod stays Pending). No PVC = no deadlock.
+  persistence:
+    enabled: false
