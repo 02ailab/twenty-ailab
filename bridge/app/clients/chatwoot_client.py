@@ -2,9 +2,14 @@
 # (/api/v1/accounts/{account_id}/...). Auth = `api_access_token` header.
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
+
+from app.structured_log import log_event
+
+logger = logging.getLogger(__name__)
 
 
 class ChatwootClient:
@@ -39,6 +44,53 @@ class ChatwootClient:
         resp = await self._client.patch(f"{self._contacts()}/{contact_id}", json=patch)
         resp.raise_for_status()
         return resp.json()
+
+    async def get_latest_conversation_display_id(self, contact_id: int) -> int | None:
+        # The contact's conversations come back ordered by last_activity_at desc, so
+        # payload[0] is the most recently active — "the chat with this client". Each
+        # item's `id` is the conversation display_id (the value the dashboard URL uses).
+        # Best-effort: any error / no conversations -> None (caller falls back to the
+        # contact page).
+        try:
+            resp = await self._client.get(f"{self._contacts()}/{contact_id}/conversations")
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            log_event(logger, "chatwoot_conversations_lookup_failed",
+                      "could not list contact conversations",
+                      level=logging.WARNING, contact_id=contact_id, error=str(exc))
+            return None
+        body = resp.json()
+        # Tolerate {"payload": [...]}, {"data": {"payload": [...]}} and a bare list.
+        items = body.get("payload", body) if isinstance(body, dict) else body
+        if isinstance(items, dict):
+            items = items.get("payload", [])
+        if not isinstance(items, list) or not items:
+            return None
+        first = items[0]
+        display_id = first.get("id") if isinstance(first, dict) else None
+        return int(display_id) if display_id is not None else None
+
+    async def update_identity_fields(self, contact_id: int, *, name: str | None = None,
+                                     email: str | None = None, phone: str | None = None) -> bool:
+        # Direction B write-back: push Twenty's basic identity onto the native
+        # Chatwoot contact. Read-compare-write so an unchanged value produces NO
+        # PATCH — this is what stops the Chatwoot<->Twenty echo loop. A None field
+        # means "don't touch" (never clobber Chatwoot with an empty value). Returns
+        # True only if something was actually written.
+        current = await self.get_contact(contact_id)
+        if current is None:
+            return False
+        patch: dict[str, Any] = {}
+        if name and (current.get("name") or "") != name:
+            patch["name"] = name
+        if email and (current.get("email") or "") != email:
+            patch["email"] = email
+        if phone and (current.get("phone_number") or "") != phone:
+            patch["phone_number"] = phone
+        if not patch:
+            return False
+        await self.update_contact(contact_id, patch)
+        return True
 
     async def set_twenty_id(self, contact_id: int, twenty_id: str,
                             current_additional: dict[str, Any] | None) -> None:

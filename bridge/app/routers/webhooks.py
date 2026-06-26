@@ -55,22 +55,49 @@ async def _safe_sync(event: str, body: dict) -> None:
                   level=logging.ERROR, chatwoot_event=event, error=str(exc))
 
 
+_TWENTY_SYNCED_EVENTS = {"person.created", "person.updated"}
+
+
 @router.post("/webhooks/twenty")
-async def twenty_webhook(request: Request) -> Response:
-    # Direction B (Twenty -> Chatwoot) is a later iteration; for now log & ack.
+async def twenty_webhook(request: Request, background: BackgroundTasks) -> Response:
+    # Direction B: a Twenty Person change writes the basic identity back onto the
+    # mapped Chatwoot contact. Ack fast (Twenty's webhook timeout is 5s) and process
+    # in the background, same as the Chatwoot handler.
     settings = get_settings()
     raw = await request.body()
+
     signature = request.headers.get("X-Twenty-Webhook-Signature", "")
     timestamp = request.headers.get("X-Twenty-Webhook-Timestamp", "")
-    if settings.twenty_webhook_secret:
-        if not signature or not verify_twenty_signature(
-            settings.twenty_webhook_secret, timestamp, raw, signature
-        ):
-            return Response(status_code=401)
+    # This endpoint is publicly reachable (Twenty's SSRF guard blocks the in-cluster
+    # address, so Twenty posts to the public ingress). Fail closed: with no secret we
+    # cannot authenticate a public caller, so refuse rather than accept unsigned.
+    if not settings.twenty_webhook_secret:
+        log_event(logger, "twenty_webhook_unconfigured",
+                  "TWENTY_WEBHOOK_SECRET not set — refusing public webhook",
+                  level=logging.ERROR)
+        return Response(status_code=401)
+    if not signature or not verify_twenty_signature(
+        settings.twenty_webhook_secret, timestamp, raw, signature
+    ):
+        log_event(logger, "webhook_signature_invalid", "twenty signature missing or mismatch",
+                  level=logging.WARNING)
+        return Response(status_code=401)
+
     try:
         body = json.loads(raw)
     except json.JSONDecodeError:
         return Response(status_code=400)
-    log_event(logger, "twenty_webhook_received", "twenty webhook (no-op for now)",
-              event_name=body.get("eventName"))
+
+    event = body.get("eventName", "")
+    if event in _TWENTY_SYNCED_EVENTS:
+        record = body.get("record") or {}
+        background.add_task(_safe_reverse_sync, event, record)
     return Response(status_code=200, content='{"ok":true}', media_type="application/json")
+
+
+async def _safe_reverse_sync(event: str, record: dict) -> None:
+    try:
+        await sync.sync_person_to_chatwoot(record)
+    except Exception as exc:  # noqa: BLE001 — webhook side-effect must not crash the loop
+        log_event(logger, "reverse_sync_failed", "twenty->chatwoot sync failed",
+                  level=logging.ERROR, twenty_event=event, error=str(exc))

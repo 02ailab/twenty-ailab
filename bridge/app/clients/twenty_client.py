@@ -88,6 +88,26 @@ class TwentyClient:
         resp.raise_for_status()
         return person_id
 
+    async def set_person_link(self, person_id: str, field_name: str,
+                              url: str, label: str) -> bool:
+        # Best-effort write of a Twenty "Links" composite field. The custom field
+        # may not exist yet (the operator creates it once), so a 400/404 here must
+        # NOT fail the whole contact sync — log and move on.
+        payload = {field_name: {
+            "primaryLinkUrl": url,
+            "primaryLinkLabel": label,
+            "secondaryLinks": [],
+        }}
+        try:
+            resp = await self._client.patch(f"/rest/people/{person_id}", json=payload)
+            resp.raise_for_status()
+            return True
+        except httpx.HTTPError as exc:  # field missing/transport — non-fatal
+            log_event(logger, "twenty_link_field_unavailable",
+                      "could not set Chatwoot link field (does it exist in Twenty?)",
+                      level=logging.WARNING, field=field_name, error=str(exc))
+            return False
+
     async def get_person(self, person_id: str) -> dict[str, Any] | None:
         resp = await self._client.get(f"/rest/people/{person_id}")
         if resp.status_code == 404:

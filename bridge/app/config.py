@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     chatwoot_api_token: str  # secret — agent/admin access token
     # HMAC secret Chatwoot signs outbound webhooks with (per-webhook secret).
     chatwoot_webhook_secret: str  # secret
+    # Public Chatwoot URL, used to build the "open chat" link shown on the Twenty
+    # Person card (must be the public host, not the internal cluster DNS above).
+    chatwoot_public_url: str = "https://chat.saldo.chat"
 
     # --- Twenty ---
     twenty_base_url: str = "http://twenty-server.twenty.svc.cluster.local:3000"
@@ -28,6 +31,10 @@ class Settings(BaseSettings):
     twenty_webhook_secret: str = ""  # secret — verifies inbound Twenty webhooks
     # Public Twenty URL, used to build "open in CRM" links shown in the panel.
     twenty_public_url: str = "https://crm.saldo.chat"
+    # API name of the Person "Links" field that holds the Chatwoot conversation
+    # link. The operator creates this field once in Twenty (Settings -> Data model
+    # -> Person, type "Links"); the bridge only populates it, best-effort.
+    twenty_chatwoot_field: str = "chatwoot"
 
     # --- Panel (public) ---
     # Public base URL of this service, used in the Dashboard App iframe URL.

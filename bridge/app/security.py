@@ -23,9 +23,10 @@ def verify_chatwoot_signature(secret: str, timestamp: str, raw_body: bytes, sign
 
 
 def verify_twenty_signature(secret: str, timestamp: str, raw_body: bytes, signature: str) -> bool:
-    # Twenty: sha256=HMAC_SHA256(secret, "{timestamp}:{raw_body}"), ts in ms.
+    # Twenty: signature = HMAC_SHA256(secret, "{timestamp}:{raw_body}") as a BARE hex
+    # digest (no "sha256=" prefix), ts in ms. raw_body is exactly JSON.stringify of
+    # the payload Twenty signs. Verified against call-webhook.job.ts:28-32.
     if not secret or not signature:
         return False
     mac = hmac.new(secret.encode(), f"{timestamp}:".encode() + raw_body, hashlib.sha256)
-    expected = f"sha256={mac.hexdigest()}"
-    return _const_eq(expected, signature)
+    return _const_eq(mac.hexdigest(), signature)

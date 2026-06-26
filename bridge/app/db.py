@@ -63,6 +63,17 @@ async def get_twenty_person_id(chatwoot_contact_id: int) -> str | None:
         return str(row) if row else None
 
 
+async def get_chatwoot_contact_id(twenty_person_id: str) -> int | None:
+    # Reverse lookup for direction B (Twenty -> Chatwoot). Cast to uuid so a string
+    # arg matches the UUID column regardless of asyncpg type inference.
+    async with _require_pool().acquire() as conn:
+        row = await conn.fetchval(
+            "SELECT chatwoot_contact_id FROM contact_map WHERE twenty_person_id = $1::uuid",
+            twenty_person_id,
+        )
+        return int(row) if row is not None else None
+
+
 async def set_twenty_person_id(chatwoot_contact_id: int, twenty_person_id: str) -> None:
     async with _require_pool().acquire() as conn:
         await conn.execute(

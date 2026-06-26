@@ -72,6 +72,9 @@ _PANEL_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- Never send the panel URL (which carries ?secret=) as Referer when the agent
+     clicks through to Twenty on another origin — would leak the shared secret. -->
+<meta name="referrer" content="no-referrer" />
 <title>Twenty CRM</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; color: #1a1a1a; }
@@ -107,7 +110,7 @@ _PANEL_HTML = """<!doctype html>
         html += field("Email", d.primaryEmail);
         html += field("Телефон", d.primaryPhone);
         html += field("Должность", d.jobTitle);
-        if (d.openInCrmUrl) html += '<a class="btn" href="' + d.openInCrmUrl + '" target="_blank">Открыть в Twenty</a>';
+        if (d.openInCrmUrl) html += '<a class="btn" href="' + d.openInCrmUrl + '" target="_blank" rel="noopener noreferrer">Открыть в Twenty</a>';
         render(html);
       })
       .catch(function () { render('<div class="muted">Не удалось загрузить карточку.</div>'); });

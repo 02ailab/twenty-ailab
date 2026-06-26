@@ -4,18 +4,27 @@ Standalone service that bridges the live **Chatwoot** (`chat.saldo.chat`) and
 **Twenty CRM** (`crm.saldo.chat`) on the Saldo k3s cluster. It does **not** modify
 either fork — it talks to both over the network.
 
-## Scope (iteration 1)
+## Scope
 
-- **Sync Chatwoot → Twenty**: on Chatwoot `contact_created` / `contact_updated` /
-  `conversation_created`, upsert a **Person** (+ linked **Company**) in Twenty.
-  Store the Twenty id back on the Chatwoot contact
-  (`additional_attributes.external.twenty_id`) and in the bridge's own DB.
-- **Panel**: a Chatwoot **Dashboard App** iframe that shows the contact's Twenty
-  card inside the conversation view (served by this service, which holds the
-  Twenty API key server-side).
+**Iteration 1 — Chatwoot → Twenty:**
 
-Out of scope for now (later): Twenty → Chatwoot write-back (bidirectional),
-conversation → Note sync.
+- on Chatwoot `contact_created` / `contact_updated` / `conversation_created`, upsert
+  a **Person** (+ linked **Company**) in Twenty. Store the Twenty id back on the
+  Chatwoot contact (`additional_attributes.external.twenty_id`) and in the bridge DB.
+- **Panel**: a Chatwoot **Dashboard App** iframe showing the contact's Twenty card.
+  Admin-only — Chatwoot serves the Dashboard App to administrators only (server-side,
+  fail-closed); the panel itself is secret-gated and never echoes the secret.
+
+**Iteration 2 — Twenty → Chatwoot:**
+
+- **Write-back**: on Twenty `person.updated`, push the basic identity (name / email /
+  phone) back onto the **native** Chatwoot contact. Only basic identity — rich Twenty
+  CRM data stays in the admin-only panel, so it never leaks to non-admin managers. The
+  echo loop is broken by compare-before-write on both sides (skip if unchanged).
+- **Chatwoot link on the Twenty card**: the bridge sets a Person "Links" field to the
+  contact's Chatwoot conversation URL, so an admin can jump from the CRM card to the chat.
+
+Out of scope (later): conversation → Note sync.
 
 ## Why all traffic is mostly internal
 
@@ -24,16 +33,22 @@ Chatwoot, Twenty and this bridge all run in the **same k3s cluster**, so:
 - Chatwoot → bridge webhooks use cluster DNS (private, no public ingress).
 - bridge → Twenty (`http://twenty-server.twenty.svc.cluster.local:3000`) is private.
 - bridge → Chatwoot REST (`http://chatwoot.chatwoot.svc.cluster.local`) is private.
-- **Only the panel** needs public HTTPS (it loads in the agent's browser) →
+- **The panel** needs public HTTPS (it loads in the agent's browser) →
   one Traefik ingress + cert-manager TLS, e.g. `bridge.saldo.chat`.
+- **`/webhooks/twenty` is also public** — Twenty's outbound SSRF guard blocks private
+  ClusterIPs, so Twenty can only reach the bridge via the public host. The endpoint is
+  HMAC-gated and fail-closed (no `TWENTY_WEBHOOK_SECRET` ⇒ rejects). `/webhooks/chatwoot`
+  stays internal (Chatwoot reaches it via cluster DNS thanks to `SAFE_FETCH_ALLOW_PRIVATE_NETWORK`).
 
 ## Architecture
 
 ```text
 Chatwoot --webhook(internal)--> /webhooks/chatwoot --> upsert Person/Company --> Twenty
-Twenty   --webhook(internal)--> /webhooks/twenty   --> (later) update Chatwoot
+                                                   \--> set Person "Links" -> Chatwoot chat URL
+Twenty   --webhook(PUBLIC,HMAC)--> /webhooks/twenty --> write name/email/phone --> Chatwoot
 Agent browser --iframe(public)--> /panel?... --> bridge queries Twenty --> CRM card
 mapping (chatwoot_contact_id <-> twenty_person_id) stored in the bridge's own Postgres
+anti-echo: compare-before-write on BOTH sides (skip if unchanged)
 ```
 
 ## Stack
@@ -47,20 +62,28 @@ FastAPI + httpx + own PostgreSQL. Deployed to k3s in its own namespace
 **Iteration 1 — LIVE since 2026-06-26** (namespace `twenty-bridge`, panel at
 `bridge.saldo.chat`). Chatwoot→Twenty contact+company sync and the Dashboard App
 panel work end-to-end in production. Includes code-review hardening: panel auth
-(secret validated, no leak), strict webhook HMAC, defensive parsing, required
-config, and container `securityContext`. Direction B (Twenty→Chatwoot) is stubbed
-in `/webhooks/twenty` for a later iteration.
+(secret validated, no leak; plus `no-referrer` so the panel URL/secret never leaks
+to the Twenty origin), strict webhook HMAC, defensive parsing, required config, and
+container `securityContext`.
+
+**Iteration 2 — LIVE since 2026-06-27** — Twenty→Chatwoot write-back + Chatwoot
+link on the Twenty card. Adds: `/webhooks/twenty` reverse sync (public, HMAC,
+fail-closed), compare-before-write anti-echo on both directions, and a best-effort
+Person "Links" field populated with the contact's latest Chatwoot conversation URL.
 
 Live deployment map: `general_docs/SERVER_ARCHITECTURE.md` §8C.
 
-## Prerequisites (all satisfied — live)
+## Prerequisites
 
 | Item | Where from | Status |
 |------|-----------|--------|
-| Twenty API key | Twenty → Settings → APIs | ✅ configured |
-| Chatwoot API access token | Chatwoot → Profile / Agent Bot token | ✅ configured |
-| Chatwoot `account_id` | Chatwoot URL / API | ✅ `1` |
+| Twenty API key | Twenty → Settings → APIs | ✅ configured (live) |
+| Chatwoot API access token | Chatwoot → Profile / Agent Bot token | ✅ configured (live) |
+| Chatwoot `account_id` | Chatwoot URL / API | ✅ `1` (live) |
 | Public host for panel | DNS A-record `bridge.saldo.chat` → VPS IP | ✅ live (TLS `bridge-tls` Ready) |
+| **Twenty webhook secret** (iter 2) | random string → `TWENTY_WEBHOOK_SECRET` + Twenty webhook config | ✅ set (live) |
+| **Person "Links" field** (iter 2) | Twenty → Settings → Data model → Person → add field, type **Links**, API name `chatwoot` | ✅ created |
+| **Twenty → bridge webhook** (iter 2) | Twenty → Settings → Developers → Webhooks → `person.updated` → public bridge URL | ✅ live (HMAC) |
 
 ## Layout
 
@@ -76,11 +99,11 @@ bridge/
       chatwoot_client.py # Chatwoot REST client
     routers/
       health.py        # /healthz /readyz
-      webhooks.py      # /webhooks/chatwoot /webhooks/twenty (strict HMAC)
-      panel.py         # /panel iframe + proxy (secret-gated, no fallback)
+      webhooks.py      # /webhooks/chatwoot (internal) + /webhooks/twenty (public, HMAC, fail-closed)
+      panel.py         # /panel iframe + proxy (secret-gated, no fallback, no-referrer)
     services/
-      sync.py          # Chatwoot->Twenty upsert logic
-  deploy/k8s/twenty-bridge.yaml   # namespace, own Postgres, Deployment, Service, Ingress(/panel)
+      sync.py          # Chatwoot->Twenty upsert + Twenty->Chatwoot write-back (compare-before-write)
+  deploy/k8s/twenty-bridge.yaml   # namespace, own Postgres, Deployment, Service, Ingress(/panel + /webhooks/twenty)
   scripts/                        # k8s_create_secret.sh, deploy_local_k3s.sh, smoke_port_forward.sh
   deploy.sh                       # operator entry point (WinSCP -> bash deploy.sh)
   Dockerfile  pyproject.toml  .env.example
@@ -95,7 +118,9 @@ Per `general_docs/SALDO_K3S_DEPLOYMENT_GUIDE.md`:
 2. WinSCP-upload this `bridge/` folder to `/root/twenty-bridge/`.
 3. On the VPS: `cd /root/twenty-bridge && cp .env.example .env && nano .env`
    (fill `POSTGRES_PASSWORD`, `PANEL_SHARED_SECRET`, `CHATWOOT_API_TOKEN`,
-   `CHATWOOT_ACCOUNT_ID`; `TWENTY_API_KEY` once the Twenty admin exists).
+   `CHATWOOT_ACCOUNT_ID`, `TWENTY_API_KEY`; for iteration 2 also set
+   `TWENTY_WEBHOOK_SECRET` — required, the public reverse webhook is fail-closed).
+   `CHATWOOT_PUBLIC_URL` / `TWENTY_CHATWOOT_FIELD` default correctly for prod.
 4. `bash deploy.sh` — builds the image, imports into k3s, creates the Secret,
    applies manifests, smokes `/healthz`. cert-manager issues `bridge-tls` once DNS
    resolves.
@@ -116,4 +141,20 @@ Secret-only refresh (e.g. after the Twenty API key arrives):
    `/panel` validates this secret (no fallback). If it is ever exposed, rotate
    `PANEL_SHARED_SECRET`, run a full `bash deploy.sh`, then update this URL via
    `PATCH /api/v1/accounts/:id/dashboard_apps/:id`.
+
+## Configure Twenty (after deploy — iteration 2)
+
+1. **Person "Links" field** (Settings → Data model → Person → add field) → type
+   **Links**, API name `chatwoot` (must match `TWENTY_CHATWOOT_FIELD`). The bridge
+   populates it best-effort; if the field is missing it logs `twenty_link_field_unavailable`
+   and the rest of the sync still succeeds.
+2. **Webhook** (Settings → Developers → Webhooks) → operation `person.updated`
+   (optionally `person.created`), target URL **public**
+   `https://bridge.saldo.chat/webhooks/twenty` (NOT the cluster-internal address —
+   Twenty's SSRF guard blocks private IPs), secret = `TWENTY_WEBHOOK_SECRET`.
+3. **Hairpin check** — confirm Twenty pods can reach the public ingress from inside
+   the cluster (single-node k3s usually allows this):
+   `kubectl -n twenty exec deploy/twenty-server -- curl -sk -o /dev/null -w '%{http_code}\n' https://bridge.saldo.chat/panel`
+   → expect `403` (reached the bridge, secret rejected) — anything other than a
+   connection error means the hairpin works and the webhook will be delivered.
 
