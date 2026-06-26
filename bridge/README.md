@@ -44,19 +44,23 @@ FastAPI + httpx + own PostgreSQL. Deployed to k3s in its own namespace
 
 ## Status
 
-Iteration 1 implemented (not yet deployed): Chatwoot→Twenty contact+company sync
-and the Dashboard App panel. API shapes verified against both codebases. End-to-end
-run is gated on the Twenty API key (see Prerequisites). Direction B (Twenty→Chatwoot)
-is stubbed in `/webhooks/twenty` for a later iteration.
+**Iteration 1 — LIVE since 2026-06-26** (namespace `twenty-bridge`, panel at
+`bridge.saldo.chat`). Chatwoot→Twenty contact+company sync and the Dashboard App
+panel work end-to-end in production. Includes code-review hardening: panel auth
+(secret validated, no leak), strict webhook HMAC, defensive parsing, required
+config, and container `securityContext`. Direction B (Twenty→Chatwoot) is stubbed
+in `/webhooks/twenty` for a later iteration.
 
-## Prerequisites (to run end-to-end)
+Live deployment map: `general_docs/SERVER_ARCHITECTURE.md` §8C.
+
+## Prerequisites (all satisfied — live)
 
 | Item | Where from | Status |
 |------|-----------|--------|
-| Twenty API key | Twenty → Settings → APIs (needs admin/workspace) | blocked on admin creation |
-| Chatwoot API access token | Chatwoot → Profile / Agent Bot token | obtainable now |
-| Chatwoot `account_id` | Chatwoot URL / API | obtainable now |
-| Public host for panel | DNS A-record `bridge.saldo.chat` → VPS IP | to add (like crm) |
+| Twenty API key | Twenty → Settings → APIs | ✅ configured |
+| Chatwoot API access token | Chatwoot → Profile / Agent Bot token | ✅ configured |
+| Chatwoot `account_id` | Chatwoot URL / API | ✅ `1` |
+| Public host for panel | DNS A-record `bridge.saldo.chat` → VPS IP | ✅ live (TLS `bridge-tls` Ready) |
 
 ## Layout
 
@@ -66,16 +70,16 @@ bridge/
     main.py            # FastAPI app + lifespan + routers
     config.py          # settings (env)
     logging_setup.py   # structured JSON logging (LOGGING_INCIDENTINATOR §0.1)
-    db.py              # Postgres pool + id-mapping table          (TODO)
+    db.py              # Postgres pool + id-mapping tables
     clients/
-      twenty_client.py   # Twenty REST/GraphQL client             (TODO: verified shapes)
-      chatwoot_client.py # Chatwoot REST client                   (TODO)
+      twenty_client.py   # Twenty REST client (verified composite-field shapes)
+      chatwoot_client.py # Chatwoot REST client
     routers/
       health.py        # /healthz /readyz
-      webhooks.py      # /webhooks/chatwoot /webhooks/twenty      (TODO)
-      panel.py         # /panel iframe + proxy                    (TODO)
+      webhooks.py      # /webhooks/chatwoot /webhooks/twenty (strict HMAC)
+      panel.py         # /panel iframe + proxy (secret-gated, no fallback)
     services/
-      sync.py          # Chatwoot->Twenty upsert logic            (TODO)
+      sync.py          # Chatwoot->Twenty upsert logic
   deploy/k8s/twenty-bridge.yaml   # namespace, own Postgres, Deployment, Service, Ingress(/panel)
   scripts/                        # k8s_create_secret.sh, deploy_local_k3s.sh, smoke_port_forward.sh
   deploy.sh                       # operator entry point (WinSCP -> bash deploy.sh)
@@ -109,4 +113,7 @@ Secret-only refresh (e.g. after the Twenty API key arrives):
    `POST /api/v1/accounts/:id/dashboard_apps`) →
    content `[{"type":"frame","url":"https://bridge.saldo.chat/panel?secret=<PANEL_SHARED_SECRET>"}]`.
    The panel then appears in the conversation view and shows the contact's Twenty card.
+   `/panel` validates this secret (no fallback). If it is ever exposed, rotate
+   `PANEL_SHARED_SECRET`, run a full `bash deploy.sh`, then update this URL via
+   `PATCH /api/v1/accounts/:id/dashboard_apps/:id`.
 
