@@ -222,3 +222,56 @@ This handles everything: starts Postgres + Redis (auto-detects local services vs
 - `tsconfig.base.json` - Base TypeScript configuration
 - `package.json` - Root package with workspace definitions
 - `.cursor/rules/` - Detailed development guidelines and best practices
+
+---
+
+# Saldo Platform Integration (this fork)
+
+This repo is **not** stock upstream Twenty — it is the **Saldo platform's** Twenty CRM,
+deployed live to a single-VPS k3s cluster (`crm.saldo.chat`) and integrated with the
+live Chatwoot (`chat.saldo.chat`) via a standalone **bridge** service (`bridge/`,
+namespace `twenty-bridge`, public panel at `bridge.saldo.chat`). The platform is a set
+of cooperating services (Chatwoot, llm-core, Twenty, bridge, work-services), each in its
+own k3s namespace with its own DB, deployed via the WinSCP → `bash deploy.sh` pattern.
+
+## Canonical documentation lives outside this repo
+
+The single source of truth for platform/server architecture is the central catalog
+`../general_docs/` (sibling of this repo). The live-server map is
+`../general_docs/SERVER_ARCHITECTURE.md` (Twenty = §8B, bridge = §8C); the logging
+contract is `../general_docs/LOGGING_INCIDENTINATOR.md` §0.1. Service repos do **not**
+keep copies of these files — only a pointer.
+
+**RULE — always update the central docs on infra changes (same task as the change).**
+Whenever you change anything that alters the live platform — a namespace, service,
+Deployment/StatefulSet, Ingress host, public URL, Secret/ConfigMap, DB, backup CronJob,
+Helm release/revision, webhook wiring, an API contract another service consumes, or the
+logging surface — update the relevant file in `../general_docs/` (almost always
+`SERVER_ARCHITECTURE.md`) in the **same** task, before considering the work done. The doc
+must always match the actual server. If this CLAUDE.md and the canon ever disagree, the
+canon wins and you fix this file in the same task. This mirrors the catalog rule the
+other Saldo repos follow (e.g. `../saldo-wiki/CLAUDE.md`).
+
+## Data chains — analyze the flow before touching a cross-service contract
+
+Integration bugs live at the **seams** between services (Chatwoot ⇄ bridge ⇄ Twenty),
+where a payload is produced by one system, transits the bridge, and is consumed by
+another. Before editing any data contract at such a seam — a webhook payload shape, a
+field mapping, the panel/postMessage contract, an HMAC signing scheme, an ID-mapping
+table — write out the **DATA-FLOW ANALYSIS** first:
+
+```text
+DATA-FLOW ANALYSIS
+- Source:    <who produces it: Chatwoot webhook / Twenty REST / panel postMessage / DB>
+- Transits:  <what it passes through: bridge router → sync service → client → mapping table>
+- Consumer:  <who reads it: Twenty Person/Company / Chatwoot contact / the iframe panel>
+- Risks:     <HMAC scheme match, SSRF/private-net reachability, echo loop (A↔B),
+              idempotency / dedup key, field-shape mismatch, secret/token leakage,
+              Chatwoot ~5s webhook timeout>
+- Status:    <safe | requires synchronous change to the consumer on the other side>
+```
+
+A contract is a two-sided agreement: if you change what the bridge sends to Twenty (or
+writes back to Chatwoot), the consumer on the other side must change in lockstep, or be
+verified unaffected. Never change one side of a seam blind to the other. (Concept adapted
+from the `АНАЛИЗ ПОТОКА` invariant in `../saldo-wiki/CLAUDE.md`.)

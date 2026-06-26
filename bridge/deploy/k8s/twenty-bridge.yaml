@@ -1,0 +1,230 @@
+# twenty-bridge: Chatwoot <-> Twenty integration service + its own PostgreSQL.
+# ClusterIP for webhooks (private, in-cluster), plus a Traefik Ingress that
+# exposes ONLY /panel publicly (the Dashboard App iframe). Secrets come from the
+# k8s Secret twenty-bridge-secrets (created by scripts/k8s_create_secret.sh).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: twenty-bridge
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: twenty-bridge-config
+  namespace: twenty-bridge
+data:
+  CHATWOOT_BASE_URL: "http://chatwoot.chatwoot.svc.cluster.local:3000"
+  CHATWOOT_ACCOUNT_ID: "1"
+  TWENTY_BASE_URL: "http://twenty-server.twenty.svc.cluster.local:3000"
+  TWENTY_PUBLIC_URL: "https://crm.saldo.chat"
+  BRIDGE_PUBLIC_URL: "https://bridge.saldo.chat"
+  POSTGRES_HOST: "twenty-bridge-postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: "bridge"
+  POSTGRES_DB: "twenty_bridge"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+---
+# Secret keys (kept DISJOINT from ConfigMap keys so envFrom order doesn't matter):
+#   CHATWOOT_API_TOKEN, CHATWOOT_WEBHOOK_SECRET, TWENTY_API_KEY,
+#   TWENTY_WEBHOOK_SECRET, PANEL_SHARED_SECRET, POSTGRES_PASSWORD
+# Created on the VPS from .env by scripts/k8s_create_secret.sh — never committed.
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: twenty-bridge-postgres
+  namespace: twenty-bridge
+spec:
+  serviceName: twenty-bridge-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: twenty-bridge-postgres
+  template:
+    metadata:
+      labels:
+        app: twenty-bridge-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          # Run as root initially so the entrypoint can fix PGDATA perms then drop
+          # to the postgres user (avoids local-path permission issues).
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: twenty-bridge-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: twenty-bridge-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: twenty-bridge-secrets
+                  key: POSTGRES_PASSWORD
+            # Use a subdir so the volume mount point itself isn't PGDATA.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: twenty-bridge-postgres
+  namespace: twenty-bridge
+spec:
+  type: ClusterIP
+  selector:
+    app: twenty-bridge-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: twenty-bridge-api
+  namespace: twenty-bridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: twenty-bridge-api
+  template:
+    metadata:
+      labels:
+        app: twenty-bridge-api
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h twenty-bridge-postgres -p 5432 -U "$POSTGRES_USER"; do
+                echo "waiting for postgres..."; sleep 2
+              done
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: twenty-bridge-config
+                  key: POSTGRES_USER
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      containers:
+        - name: api
+          image: twenty-bridge:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: twenty-bridge-secrets
+            - configMapRef:
+                name: twenty-bridge-config
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: twenty-bridge-api
+  namespace: twenty-bridge
+spec:
+  type: ClusterIP
+  selector:
+    app: twenty-bridge-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+# Public ingress — ONLY /panel is exposed (the Dashboard App iframe). Webhooks
+# (/webhooks/*) stay reachable only via cluster DNS, not from the internet.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: twenty-bridge
+  namespace: twenty-bridge
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: bridge.saldo.chat
+      http:
+        paths:
+          - path: /panel
+            pathType: Prefix
+            backend:
+              service:
+                name: twenty-bridge-api
+                port:
+                  name: http
+  tls:
+    - secretName: bridge-tls
+      hosts:
+        - bridge.saldo.chat
