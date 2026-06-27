@@ -252,6 +252,18 @@ must always match the actual server. If this CLAUDE.md and the canon ever disagr
 canon wins and you fix this file in the same task. This mirrors the catalog rule the
 other Saldo repos follow (e.g. `../saldo-wiki/CLAUDE.md`).
 
+## Reproducibility — files and idempotent scripts, not ad-hoc commands
+
+**RULE — anything reusable is a committed file, not a terminal command.** Setup, deploy,
+cron, configuration, backups, migrations, any repeatable server wiring → version-controlled
+files + an **idempotent** `install-*.sh` / `deploy.sh` the operator runs once (WinSCP →
+PuTTY; agents have no SSH). Ad-hoc commands are allowed ONLY for transient, non-reusable
+actions: viewing logs/status, post-deploy smoke checks, one-off diagnostics, interactive
+auth. Test: *"will this run again, on another service or a fresh server?"* — yes → file; no
+→ a command is fine. Never hand-edit installed scripts/cron on the server; change the repo
+file and re-run the installer. Full standard: `../general_docs/REPRODUCIBILITY_STANDARD.md`.
+Reference implementation: `bridge/deploy/backups/install-backups.sh` + `saldo-backups.cron`.
+
 ## Data chains — analyze the flow before touching a cross-service contract
 
 Integration bugs live at the **seams** between services (Chatwoot ⇄ bridge ⇄ Twenty),
