@@ -1,8 +1,10 @@
 # Chatwoot -> Twenty sync (iteration 1, one direction).
 # A Chatwoot contact becomes a Twenty Person, optionally linked to a Twenty
-# Company derived from additional_attributes.company_name. Idempotency is driven
-# by the bridge's own mapping table; a Twenty email lookup is a best-effort
-# fallback so we don't create duplicates the first time we see a contact.
+# Company. The company name is taken from additional_attributes.company_name when
+# present, else derived from a corporate email domain; free-provider emails (gmail
+# etc.) yield no company so individuals stay company-less (no fake bucket).
+# Idempotency is driven by the bridge's own mapping table; a Twenty email lookup is
+# a best-effort fallback so we don't create duplicates the first time we see a contact.
 from __future__ import annotations
 
 import logging
@@ -29,6 +31,50 @@ def split_name(full_name: str) -> tuple[str, str]:
 
 def normalize_company_key(name: str) -> str:
     return (name or "").strip().lower()
+
+
+# Free email providers — a contact on one of these is an individual, not a company.
+# We never group them under a "provider" company; they stay company-less. Lowercase.
+FREE_EMAIL_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com",
+    "yandex.ru", "yandex.com", "ya.ru",
+    "mail.ru", "bk.ru", "inbox.ru", "list.ru", "internet.ru",
+    "outlook.com", "hotmail.com", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com",
+    "proton.me", "protonmail.com", "pm.me",
+    "gmx.com", "gmx.net", "web.de", "aol.com", "zoho.com",
+    "qq.com", "163.com", "126.com",
+})
+
+# Multi-label public suffixes special-cased so acme.co.uk -> "acme", not "co".
+_MULTI_PART_TLDS = frozenset({
+    "co.uk", "org.uk", "ac.uk", "gov.uk",
+    "com.br", "com.au", "com.tr", "com.ua", "co.jp", "co.nz", "co.za", "com.mx",
+})
+
+
+def _registrable_label(domain: str) -> str:
+    # The company-ish label of a domain: the part left of the effective TLD.
+    # acme.com -> "acme"; mail.acme.com -> "acme"; acme.co.uk -> "acme".
+    parts = domain.split(".")
+    if len(parts) < 2:
+        return ""
+    if ".".join(parts[-2:]) in _MULTI_PART_TLDS and len(parts) >= 3:
+        return parts[-3]
+    return parts[-2]
+
+
+def _company_name_from_email(email: str) -> str | None:
+    # Derive a company name from a corporate email domain. Free providers and
+    # malformed addresses yield None (the person stays company-less — the
+    # "no fake bucket" decision in the company-source design).
+    if "@" not in email:
+        return None
+    domain = email.rsplit("@", 1)[1].strip().lower()
+    if not domain or domain in FREE_EMAIL_DOMAINS:
+        return None
+    label = _registrable_label(domain)
+    return label.capitalize() if label else None
 
 
 def extract_contact(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -147,7 +193,17 @@ async def sync_contact_to_twenty(event: str, payload: dict[str, Any]) -> str | N
     settings = get_settings()
 
     additional = contact.get("additional_attributes") or {}
-    company_id = await _upsert_company(additional.get("company_name") or "")
+    # Company name: explicit Chatwoot field first, else corporate email domain.
+    # Free-provider / no email -> stays empty -> Person without a company.
+    company_name = (additional.get("company_name") or "").strip()
+    if not company_name:
+        derived = _company_name_from_email(contact.get("email") or "")
+        if derived:
+            company_name = derived
+            log_event(logger, "company_resolved_from_email",
+                      "company name derived from email domain",
+                      chatwoot_contact_id=chatwoot_contact_id, company=company_name)
+    company_id = await _upsert_company(company_name)
 
     # Resolve the Twenty person: own mapping first, else best-effort email dedup.
     mapped_id = await db.get_twenty_person_id(chatwoot_contact_id)
