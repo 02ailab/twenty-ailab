@@ -24,7 +24,15 @@ either fork — it talks to both over the network.
 - **Chatwoot link on the Twenty card**: the bridge sets a Person "Links" field to the
   contact's Chatwoot conversation URL, so an admin can jump from the CRM card to the chat.
 
-Out of scope (later): conversation → Note sync.
+**Iteration 3 — more sync:**
+
+- **Company from email**: when a Chatwoot contact has no `company_name`, derive the Twenty
+  Company from a corporate email domain; free-provider / no email → no company (no fake bucket).
+- **Conversation → Note**: on a Chatwoot conversation resolve, write the transcript to ONE
+  Twenty Note on the contact's Person (one note per conversation, body refreshed on each
+  resolve; private/activity messages filtered).
+
+Out of scope (later): migrate the panel from a static URL-secret to a session/one-time token.
 
 ## Why all traffic is mostly internal
 
@@ -70,6 +78,12 @@ container `securityContext`.
 link on the Twenty card. Adds: `/webhooks/twenty` reverse sync (public, HMAC,
 fail-closed), compare-before-write anti-echo on both directions, and a best-effort
 Person "Links" field populated with the contact's latest Chatwoot conversation URL.
+
+**Iteration 3 — LIVE since 2026-06-27** — company-from-email-domain + Chatwoot
+conversation→Twenty Note transcript (one note per conversation, refreshed on each
+resolve, private/activity filtered). Requires the Chatwoot account webhook to also
+subscribe to `conversation_status_changed`. NoteTarget link uses `personId` (live
+Twenty v1.14.0 classic relation).
 
 Live deployment map: `general_docs/SERVER_ARCHITECTURE.md` §8C.
 
