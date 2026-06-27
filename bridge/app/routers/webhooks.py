@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _SYNCED_EVENTS = {"contact_created", "contact_updated", "conversation_created"}
+# Conversation resolve arrives as conversation_status_changed (status=resolved);
+# it drives the Twenty Note transcript, not the contact upsert.
+_NOTE_EVENTS = {"conversation_status_changed"}
 
 
 @router.post("/webhooks/chatwoot")
@@ -41,9 +44,11 @@ async def chatwoot_webhook(request: Request, background: BackgroundTasks) -> Res
         return Response(status_code=400)
 
     event = body.get("event", "")
+    # Process after responding so Chatwoot's ~5s webhook timeout isn't hit.
     if event in _SYNCED_EVENTS:
-        # Process after responding so Chatwoot's ~5s webhook timeout isn't hit.
         background.add_task(_safe_sync, event, body)
+    elif event in _NOTE_EVENTS:
+        background.add_task(_safe_note_sync, body)
     return Response(status_code=200, content='{"ok":true}', media_type="application/json")
 
 
@@ -53,6 +58,14 @@ async def _safe_sync(event: str, body: dict) -> None:
     except Exception as exc:  # noqa: BLE001 — webhook side-effect must not crash the loop
         log_event(logger, "sync_failed", "contact sync failed",
                   level=logging.ERROR, chatwoot_event=event, error=str(exc))
+
+
+async def _safe_note_sync(body: dict) -> None:
+    try:
+        await sync.sync_conversation_to_note(body)
+    except Exception as exc:  # noqa: BLE001 — webhook side-effect must not crash the loop
+        log_event(logger, "note_sync_failed", "conversation->note sync failed",
+                  level=logging.ERROR, error=str(exc))
 
 
 _TWENTY_SYNCED_EVENTS = {"person.created", "person.updated"}

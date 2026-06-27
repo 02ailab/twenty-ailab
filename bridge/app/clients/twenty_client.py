@@ -140,3 +140,41 @@ class TwentyClient:
         if not rec or "id" not in rec:
             raise RuntimeError("Twenty createCompany returned no id")
         return rec["id"]
+
+    # --- notes ---
+    # Note body is the RichText composite `bodyV2` = {markdown, blocknote}. On import
+    # only `markdown` is filled (blocknote=null) — verified against the Twenty fork's
+    # rich-text composite type.
+
+    async def create_note(self, title: str, markdown: str) -> str:
+        payload = {"title": title,
+                   "bodyV2": {"markdown": markdown, "blocknote": None},
+                   "position": 0}
+        resp = await self._client.post("/rest/notes", json=payload)
+        resp.raise_for_status()
+        rec = self._extract_record(resp.json(), "createNote")
+        if not rec or "id" not in rec:
+            raise RuntimeError("Twenty createNote returned no id")
+        return rec["id"]
+
+    async def update_note(self, note_id: str, title: str, markdown: str) -> None:
+        payload = {"title": title,
+                   "bodyV2": {"markdown": markdown, "blocknote": None}}
+        resp = await self._client.patch(f"/rest/notes/{note_id}", json=payload)
+        resp.raise_for_status()
+
+    async def link_note_to_person(self, note_id: str, person_id: str) -> bool:
+        # Attach the note to a Person via a NoteTarget. Best-effort: a transient or
+        # duplicate-target error must not crash the note sync.
+        # NOTE: the live Twenty (v1.14.0) NoteTarget uses the classic relation FK
+        # `personId`. Newer Twenty makes this a morph relation (`targetPersonId`) —
+        # if the server is upgraded, this field name must change accordingly.
+        payload = {"noteId": note_id, "personId": person_id}
+        try:
+            resp = await self._client.post("/rest/noteTargets", json=payload)
+            resp.raise_for_status()
+            return True
+        except httpx.HTTPError as exc:
+            log_event(logger, "twenty_note_link_failed", "could not link note to person",
+                      level=logging.WARNING, note_id=note_id, error=str(exc))
+            return False

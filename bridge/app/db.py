@@ -23,6 +23,15 @@ CREATE TABLE IF NOT EXISTS company_map (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- One Twenty Note per Chatwoot conversation (keyed by display_id). On each
+-- resolve the body is rewritten with the latest full transcript (variant C).
+CREATE TABLE IF NOT EXISTS note_map (
+    conversation_display_id BIGINT PRIMARY KEY,
+    twenty_note_id          UUID NOT NULL,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -110,4 +119,29 @@ async def set_twenty_company_id(company_key: str, twenty_company_id: str) -> Non
                           updated_at = now()
             """,
             company_key, twenty_company_id,
+        )
+
+
+# --- note mapping (conversation display_id <-> Twenty note) ---
+
+async def get_note_id(conversation_display_id: int) -> str | None:
+    async with _require_pool().acquire() as conn:
+        row = await conn.fetchval(
+            "SELECT twenty_note_id FROM note_map WHERE conversation_display_id = $1",
+            conversation_display_id,
+        )
+        return str(row) if row else None
+
+
+async def set_note_id(conversation_display_id: int, twenty_note_id: str) -> None:
+    async with _require_pool().acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO note_map (conversation_display_id, twenty_note_id)
+            VALUES ($1, $2)
+            ON CONFLICT (conversation_display_id)
+            DO UPDATE SET twenty_note_id = EXCLUDED.twenty_note_id,
+                          updated_at = now()
+            """,
+            conversation_display_id, twenty_note_id,
         )

@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # -> Person, type "Links"); the bridge only populates it, best-effort.
     twenty_chatwoot_field: str = "chatwoot"
 
+    # --- Notes (Chatwoot conversation -> Twenty Note) ---
+    # On a Chatwoot conversation resolve, write the transcript to a Twenty Note on
+    # the contact's Person (one note per conversation, body refreshed each resolve).
+    note_sync_enabled: bool = True
+    # Cap transcript length (keeps the most recent N messages) to bound note size.
+    note_max_messages: int = 100
+
     # --- Panel (public) ---
     # Public base URL of this service, used in the Dashboard App iframe URL.
     bridge_public_url: str = "https://bridge.saldo.chat"

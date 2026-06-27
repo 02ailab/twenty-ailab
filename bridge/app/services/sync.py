@@ -285,3 +285,81 @@ async def sync_person_to_chatwoot(record: dict[str, Any]) -> int | None:
               twenty_person_id=str(person_id), chatwoot_contact_id=chatwoot_contact_id,
               wrote=wrote)
     return chatwoot_contact_id
+
+
+# --- conversation -> Twenty Note (one note per conversation, refreshed on resolve) ---
+
+NOTE_TITLE_PREFIX = "Переписка Chatwoot"
+
+
+def _format_message_line(msg: dict[str, Any]) -> str | None:
+    # One transcript line per real message. Skip private agent notes and `activity`
+    # (message_type 2 = status changes etc.) so internal/system noise never reaches
+    # the CRM note. incoming=0 → client, everything else → agent side.
+    if msg.get("private"):
+        return None
+    if msg.get("message_type") == 2:
+        return None
+    content = (msg.get("content") or "").strip()
+    if not content:
+        return None
+    who = "Клиент" if msg.get("message_type") == 0 else "Агент"
+    return f"**{who}:** {content}"
+
+
+def _build_note_markdown(messages: list[dict[str, Any]], max_messages: int) -> tuple[str, int]:
+    lines = [line for msg in messages if (line := _format_message_line(msg))]
+    if max_messages > 0 and len(lines) > max_messages:
+        lines = lines[-max_messages:]  # keep the most recent within the cap
+    return "\n\n".join(lines), len(lines)
+
+
+async def sync_conversation_to_note(payload: dict[str, Any]) -> str | None:
+    # On conversation_status_changed/resolved, write the transcript to a Twenty Note
+    # on the contact's Person. One note per conversation (keyed by display_id); on a
+    # later resolve (after reopen) the SAME note's body is rewritten with the latest
+    # full transcript — no duplicates, never stale.
+    settings = get_settings()
+    if not settings.note_sync_enabled:
+        return None
+    if (payload.get("status") or "") != "resolved":
+        return None
+
+    display_id = payload.get("id")
+    if display_id is None:
+        return None
+    display_id = int(display_id)
+
+    sender = (payload.get("meta") or {}).get("sender") or {}
+    contact_id = sender.get("id")
+    person_id = await db.get_twenty_person_id(int(contact_id)) if contact_id is not None else None
+    if not person_id:
+        log_event(logger, "note_skipped_no_person", "conversation contact not mapped to a person",
+                  conversation_display_id=display_id)
+        return None
+
+    chatwoot = deps.require_chatwoot()
+    twenty = deps.require_twenty()
+
+    messages = await chatwoot.get_conversation_messages(display_id)
+    body, count = _build_note_markdown(messages, settings.note_max_messages)
+    if count == 0:
+        log_event(logger, "note_skipped_empty", "no usable messages in conversation",
+                  conversation_display_id=display_id)
+        return None
+
+    title = f"{NOTE_TITLE_PREFIX} #{display_id}"
+    note_id = await db.get_note_id(display_id)
+    if note_id:
+        await twenty.update_note(note_id, title, body)
+        action = "updated"
+    else:
+        note_id = await twenty.create_note(title, body)
+        await twenty.link_note_to_person(note_id, person_id)
+        await db.set_note_id(display_id, note_id)
+        action = "created"
+
+    log_event(logger, "conversation_note_created", "conversation synced to Twenty note",
+              conversation_display_id=display_id, twenty_note_id=note_id,
+              twenty_person_id=person_id, message_count=count, action=action)
+    return note_id

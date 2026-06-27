@@ -70,6 +70,26 @@ class ChatwootClient:
         display_id = first.get("id") if isinstance(first, dict) else None
         return int(display_id) if display_id is not None else None
 
+    async def get_conversation_messages(self, conversation_display_id: int) -> list[dict[str, Any]]:
+        # Fetch a conversation's messages to build the Twenty Note transcript. The
+        # index endpoint keys the conversation by display_id and returns
+        # {payload: [...]} (chronological page of the latest messages). Best-effort:
+        # any error -> empty list (the caller then skips the note).
+        try:
+            resp = await self._client.get(
+                f"/api/v1/accounts/{self._account_id}/conversations/{conversation_display_id}/messages"
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            log_event(logger, "chatwoot_messages_lookup_failed",
+                      "could not list conversation messages",
+                      level=logging.WARNING, conversation_display_id=conversation_display_id,
+                      error=str(exc))
+            return []
+        body = resp.json()
+        items = body.get("payload", body) if isinstance(body, dict) else body
+        return items if isinstance(items, list) else []
+
     async def update_identity_fields(self, contact_id: int, *, name: str | None = None,
                                      email: str | None = None, phone: str | None = None) -> bool:
         # Direction B write-back: push Twenty's basic identity onto the native
