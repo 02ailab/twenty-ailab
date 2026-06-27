@@ -142,6 +142,19 @@ Secret-only refresh (e.g. after the Twenty API key arrives):
    `PANEL_SHARED_SECRET`, run a full `bash deploy.sh`, then update this URL via
    `PATCH /api/v1/accounts/:id/dashboard_apps/:id`.
 
+## Backups
+
+Per the platform standard `general_docs/BACKUP_STANDARD.md` (mandatory for all services).
+twenty-bridge stores only a mapping DB and no uploaded files, so a **full** backup =
+Postgres dump + the encrypted k8s Secret:
+
+- Script: `bridge/deploy/backups/backup-twenty-bridge.sh` → copy to `/root/backups/bin/`
+  on the VPS, cron via `/etc/cron.d/saldo-backups` (daily 03:00).
+- Output: `/root/backups/twenty-bridge/{db,secrets}/` (DB `*.sql.gz`, Secret `*.yaml.age`),
+  retention 7. Secrets are `age`-encrypted; the private key is kept **off** the server.
+- Offsite: the platform-wide `offsite-sync.sh` ships the whole `/root/backups` tree weekly
+  (stub until `OFFSITE_REMOTE` is set). See the standard for key setup and restore steps.
+
 ## Configure Twenty (after deploy — iteration 2)
 
 1. **Person "Links" field** (Settings → Data model → Person → add field) → type
