@@ -1,5 +1,7 @@
 .env
 .env.*
+# any other *.env is a secret too (e.g. a downloaded service secrets file) — never commit
+*.env
 !.env.example
 .venv/
 __pycache__/
