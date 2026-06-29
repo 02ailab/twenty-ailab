@@ -35,11 +35,24 @@ def _limiter() -> RateLimiter:
     return _rate_limiter
 
 
+# Pod-network hops we treat as trusted proxies in X-Forwarded-For (k3s/flannel pod CIDR
+# 10.42.0.0/16 — Traefik runs here). PLAT-6 set Traefik to externalTrafficPolicy: Local +
+# forwardedHeaders.trustedIPs=10.42.0.0/16, so the real external client IP is the hop
+# Traefik appends; any client-supplied XFF prefix sits to its LEFT.
+_TRUSTED_PROXY_PREFIXES = ("10.42.",)
+
+
 def _client_key(request: Request) -> str:
-    # Behind Traefik the real client is the first hop of X-Forwarded-For.
+    # Rate-limit key = the rightmost X-Forwarded-For entry that is NOT a trusted pod-network
+    # hop, i.e. the client IP Traefik actually observed. Taking the LEFTMOST entry (the old
+    # behaviour) trusts a client-controlled value: an attacker rotating a forged leftmost XFF
+    # per request would get a fresh bucket each time and slip the id-enumeration brake (P2-7).
+    # Walking from the right past trusted proxies defeats that — a forged prefix is ignored.
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
-        return xff.split(",")[0].strip()
+        for part in reversed([p.strip() for p in xff.split(",") if p.strip()]):
+            if not part.startswith(_TRUSTED_PROXY_PREFIXES):
+                return part
     return request.client.host if request.client else "unknown"
 
 

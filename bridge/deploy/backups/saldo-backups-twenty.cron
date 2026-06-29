@@ -1,0 +1,5 @@
+# Saldo platform — Twenty CRM backup (managed in bridge/deploy/backups/, BACKUP_STANDARD.md).
+# DO NOT edit on the server: edit the repo file and re-run install-backups-twenty.sh.
+# Own cron file (/etc/cron.d/saldo-backups-twenty) so per-service installers never clobber
+# each other's lines. Format: m h dom mon dow user command. TZ = host (Europe/Moscow).
+20 3 * * *  root  /root/backups/bin/backup-twenty.sh >> /root/backups/bin/backup.log 2>&1

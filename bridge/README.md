@@ -133,10 +133,11 @@ bridge/
       panel.py         # /panel iframe (secret-gated) -> mints short-lived token; /panel/api rate-limited
     services/
       sync.py          # Chatwoot->Twenty upsert + Twenty->Chatwoot write-back (compare-before-write)
-  tests/                          # pure-function unit tests (security, ratelimit, sync helpers)
+  tests/                          # pure-function unit tests (security, ratelimit, sync, panel client-key)
   deploy/k8s/twenty-bridge.yaml   # namespace, own Postgres, Deployment, Service, Ingress(/panel + /webhooks/twenty)
   deploy/k8s/networkpolicy.yaml   # PLAT-2 default-deny ingress + allows (NOT auto-applied — see below)
-  scripts/                        # k8s_create_secret.sh, deploy_local_k3s.sh, smoke_port_forward.sh
+  deploy/backups/                 # backup-twenty-bridge.sh + backup-twenty.sh (Twenty CRM) + installers/cron/drill
+  scripts/                        # k8s_create_secret.sh, deploy_local_k3s.sh, smoke_port_forward.sh, orch-positive-b.sh
   deploy.sh                       # operator entry point (WinSCP -> bash deploy.sh)
   Dockerfile  pyproject.toml  .env.example
 ```
@@ -146,8 +147,19 @@ bridge/
 Pure-function unit tests (no DB/HTTP) under `tests/` — run from the bridge dir:
 
 ```bash
-python -m pytest -q        # 19 tests: panel-token, freshness, HMAC schemes, rate limiter, sync helpers
+python -m pytest -q        # 26 tests: panel-token, freshness, HMAC schemes, rate limiter, sync helpers, XFF client-key
 ```
+
+### Positive-chain probe (orchestration-check `--positive`)
+
+`scripts/orch-positive-b.sh` runs `scripts/orch_positive_b.py` **inside** the api pod
+(`kubectl exec -i deploy/twenty-bridge-api -- python -`). It creates a synthetic
+`test-orch-*` Chatwoot contact (free-domain email → no Company), fires a `contact_updated`
+webhook signed with the live `CHATWOOT_WEBHOOK_SECRET` (used in-pod, never printed), checks
+the bridge returns 200 and a Twenty Person + `contact_map` row appear, re-fires for
+idempotency (same person_id), then deletes the Person, mapping row and synthetic contact in
+`finally`. The HMAC/payload contract is unchanged — this is a safe test harness the
+orchestrator calls from `orchestration-check.sh --positive`. Emits one JSON result line.
 
 ## Deploy (operator, WinSCP + PuTTY)
 
@@ -194,6 +206,25 @@ Postgres dump + the encrypted k8s Secret:
   retention 7. Secrets are `age`-encrypted; the private key is kept **off** the server.
 - Offsite: the platform-wide `offsite-sync.sh` ships the whole `/root/backups` tree weekly
   (stub until `OFFSITE_REMOTE` is set). See the standard for key setup and restore steps.
+
+### Twenty CRM backup (ns `twenty`) — P1-3
+
+Twenty CRM itself (the `twenty-db` Postgres holding **client CRM data**) is backed up by an
+**external** host script — Twenty is vanilla upstream, its chart/code is never touched.
+
+- Install: `bash deploy/backups/install-backups-twenty.sh` (idempotent; own cron file
+  `/etc/cron.d/saldo-backups-twenty`, daily 03:20, so it never clobbers the bridge cron).
+- `backup-twenty.sh`: `pg_dumpall --globals-only` (roles) + `pg_dump -Fc` of every discovered
+  app DB (so the DB name isn't guessed and the dump is restore-drill-able) + attachments tar
+  from the `twenty-server` PVC + age-encrypted Secrets (`tokens`, `twenty-db-url`,
+  `twenty-db-superuser`) → `/root/backups/twenty/{db,files,secrets}/`, retention 7.
+- `restore-drill-twenty.sh`: non-destructive validation of the latest dumps; `--full` loads
+  the newest archive into a throwaway DB inside the pod and drops it.
+- **⚠️ First run:** three live-only assumptions are verified fail-loud in preflight and are
+  env-overridable — the `twenty-db-superuser` secret key names (`SUPERUSER_USER_KEY`/
+  `SUPERUSER_PASS_KEY`), the attachments path (`TWENTY_STORAGE_PATH`), and object names
+  (`TWENTY_DB_DEPLOY`/`TWENTY_SERVER_DEPLOY`). Confirm them on the first `backup-twenty.sh` run.
+  Full specifics: `general_docs/BACKUP_STANDARD.md §7.4`.
 
 ## Configure Twenty (after deploy — iteration 2)
 
