@@ -1,0 +1,76 @@
+# NetworkPolicy for ns twenty-bridge — PLAT-2 (default-deny ingress + matrix allows).
+# Matrix (fixed by the orchestrator in general_docs/work_orders/_platform.md):
+#   - default-deny ingress in the namespace;
+#   - twenty-bridge-api ingress from Traefik (kube-system) — public /panel + the
+#     /webhooks/twenty hairpin — and from the chatwoot namespace — internal
+#     /webhooks/chatwoot over cluster DNS;
+#   - twenty-bridge-postgres ingress ONLY from twenty-bridge-api.
+# Egress is intentionally left open: the bridge must reach chatwoot:3000, twenty:3000,
+# its own Postgres and DNS; egress restriction is a separate platform step.
+#
+# NOT wired into deploy.sh — wrong selectors or a CNI probe quirk would break the
+# LIVE webhook path. Apply explicitly and verify (runbook in bridge/README.md):
+#   kubectl apply -f deploy/k8s/networkpolicy.yaml
+#   kubectl -n twenty-bridge get pods   # must stay Ready (kubelet probes still pass)
+#   # then confirm a real Chatwoot webhook + the panel still work.
+# k3s enforces NetworkPolicy via its bundled kube-router controller (unless started
+# with --disable-network-policy).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: twenty-bridge
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  # No ingress rules = deny all ingress to every pod in the namespace (the allows
+  # below re-open specific paths). Egress not listed = unrestricted.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-ingress
+  namespace: twenty-bridge
+spec:
+  podSelector:
+    matchLabels:
+      app: twenty-bridge-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Traefik (public /panel + /webhooks/twenty hairpin). kube-system is trusted
+        # infra; allow the whole namespace rather than pin the Traefik pod label, so
+        # a Traefik label change can't silently blackhole the public surface.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        # Chatwoot internal webhook (/webhooks/chatwoot over cluster DNS).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: chatwoot
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-from-api
+  namespace: twenty-bridge
+spec:
+  podSelector:
+    matchLabels:
+      app: twenty-bridge-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: twenty-bridge-api
+      ports:
+        - protocol: TCP
+          port: 5432

@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     twenty_api_key: str  # secret — Bearer token from Twenty Settings -> APIs
     # Optional: direction B (Twenty -> Chatwoot) not built yet, may be empty.
     twenty_webhook_secret: str = ""  # secret — verifies inbound Twenty webhooks
+    # Replay/freshness window (seconds) for the public Twenty webhook. 0 = disabled
+    # (default — enable only after confirming Twenty's timestamp semantics and node
+    # clock skew, else valid webhooks could be rejected). E.g. 300 = ±5 min.
+    twenty_webhook_max_age_seconds: int = 0
     # Public Twenty URL, used to build "open in CRM" links shown in the panel.
     twenty_public_url: str = "https://crm.saldo.chat"
     # API name of the Person "Links" field that holds the Chatwoot conversation
@@ -49,6 +53,14 @@ class Settings(BaseSettings):
     # Shared secret embedded in the Dashboard App URL to gate the public panel.
     # Required — the panel is the only public surface; empty would disable its gate.
     panel_shared_secret: str  # secret
+    # The /panel page mints a short-lived token (signed with panel_shared_secret)
+    # so the durable secret leaves the repeatedly-called /panel/api URL. The agent
+    # keeps the iframe open per conversation; 30 min covers that, after which the
+    # page silently re-mints on a 401/403.
+    panel_token_ttl_seconds: int = 1800
+    # Per-IP cap on /panel/api/contact calls per minute (blunts id-enumeration).
+    # 0 disables the limiter.
+    panel_rate_limit_per_minute: int = 60
 
     # --- Database (own Postgres) ---
     postgres_host: str = "twenty-bridge-postgres"

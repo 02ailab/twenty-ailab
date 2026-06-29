@@ -70,25 +70,47 @@ class ChatwootClient:
         display_id = first.get("id") if isinstance(first, dict) else None
         return int(display_id) if display_id is not None else None
 
-    async def get_conversation_messages(self, conversation_display_id: int) -> list[dict[str, Any]]:
-        # Fetch a conversation's messages to build the Twenty Note transcript. The
-        # index endpoint keys the conversation by display_id and returns
-        # {payload: [...]} (chronological page of the latest messages). Best-effort:
-        # any error -> empty list (the caller then skips the note).
-        try:
-            resp = await self._client.get(
-                f"/api/v1/accounts/{self._account_id}/conversations/{conversation_display_id}/messages"
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            log_event(logger, "chatwoot_messages_lookup_failed",
-                      "could not list conversation messages",
-                      level=logging.WARNING, conversation_display_id=conversation_display_id,
-                      error=str(exc))
-            return []
-        body = resp.json()
-        items = body.get("payload", body) if isinstance(body, dict) else body
-        return items if isinstance(items, list) else []
+    async def get_conversation_messages(self, conversation_display_id: int,
+                                        max_messages: int = 1000) -> list[dict[str, Any]]:
+        # Fetch a conversation's FULL message history to build the Twenty Note
+        # transcript. The index endpoint returns only the latest page (~20) under
+        # {payload: [...]} ascending; older pages are fetched with ?before=<oldest id>.
+        # We page backwards (prepending older pages) until exhausted, a page makes no
+        # progress, or the hard caps below — so the note is the whole transcript, not
+        # just the tail. Best-effort: a first-page error -> [] (caller skips the note);
+        # a later-page error -> the partial transcript collected so far.
+        url = f"/api/v1/accounts/{self._account_id}/conversations/{conversation_display_id}/messages"
+        collected: list[dict[str, Any]] = []
+        before: int | None = None
+        oldest_seen: int | None = None
+        for _ in range(50):  # page cap: 50 * ~20 ≈ 1000 messages
+            try:
+                resp = await self._client.get(url, params={"before": before} if before is not None else None)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                log_event(logger, "chatwoot_messages_lookup_failed",
+                          "could not list conversation messages",
+                          level=logging.WARNING, conversation_display_id=conversation_display_id,
+                          error=str(exc))
+                break
+            body = resp.json()
+            items = body.get("payload", body) if isinstance(body, dict) else body
+            if not isinstance(items, list) or not items:
+                break
+            collected = items + collected
+            ids = [m.get("id") for m in items if isinstance(m, dict) and isinstance(m.get("id"), int)]
+            if not ids:
+                break
+            oldest = min(ids)
+            # Stop if the cursor didn't advance (defensive against an API that ignores
+            # `before` — otherwise we'd loop on the same page).
+            if oldest_seen is not None and oldest >= oldest_seen:
+                break
+            oldest_seen = oldest
+            before = oldest
+            if len(collected) >= max_messages:
+                break
+        return collected
 
     async def update_identity_fields(self, contact_id: int, *, name: str | None = None,
                                      email: str | None = None, phone: str | None = None) -> bool:

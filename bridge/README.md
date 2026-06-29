@@ -85,6 +85,20 @@ resolve, private/activity filtered). Requires the Chatwoot account webhook to al
 subscribe to `conversation_status_changed`. NoteTarget link uses `personId` (live
 Twenty v1.14.0 classic relation).
 
+**Prelaunch hardening (2026-06-29)** — from the prelaunch audit naryad (`general_docs/work_orders/twenty-ailab.md`):
+
+- **Panel (P0-2):** `/panel` entry is still secret-gated, but the page now mints a **short-lived token**
+  (HMAC of `PANEL_SHARED_SECRET`, TTL `PANEL_TOKEN_TTL_SECONDS`) and the JSON API is called with the
+  token — the durable secret no longer rides in `/panel/api` URLs (logs/Referer/history). Secret compares
+  are constant-time; the API is per-IP rate-limited (`PANEL_RATE_LIMIT_PER_MINUTE`). The full
+  Chatwoot-signed session token still needs chatwoot-ailab fork edits (operator-gated).
+- **Dup-Person race (P1-1):** resolve→create is serialized per contact by a Postgres advisory lock.
+- **Replay guard (P1-2):** optional freshness window on `/webhooks/twenty`, default **off**
+  (`TWENTY_WEBHOOK_MAX_AGE_SECONDS=0`).
+- **HMAC diagnostics (P0-3):** non-secret diagnostics on signature mismatch (the scheme itself is a
+  cross-service contract, unchanged). Live verification = trigger a real webhook and watch the logs.
+- Name round-trip, transcript pagination, secret-script optionality also fixed (see naryad board).
+
 Live deployment map: `general_docs/SERVER_ARCHITECTURE.md` §8C.
 
 ## Prerequisites
@@ -107,20 +121,32 @@ bridge/
     main.py            # FastAPI app + lifespan + routers
     config.py          # settings (env)
     logging_setup.py   # structured JSON logging (LOGGING_INCIDENTINATOR §0.1)
-    db.py              # Postgres pool + id-mapping tables
+    db.py              # Postgres pool + id-mapping tables + per-contact advisory lock
+    ratelimit.py       # in-memory per-IP rate limiter for the public panel API
+    security.py        # HMAC verify (chatwoot/twenty) + panel token mint/verify + ts freshness
     clients/
       twenty_client.py   # Twenty REST client (verified composite-field shapes)
-      chatwoot_client.py # Chatwoot REST client
+      chatwoot_client.py # Chatwoot REST client (conversation messages paginate via ?before)
     routers/
       health.py        # /healthz /readyz
       webhooks.py      # /webhooks/chatwoot (internal) + /webhooks/twenty (public, HMAC, fail-closed)
-      panel.py         # /panel iframe + proxy (secret-gated, no fallback, no-referrer)
+      panel.py         # /panel iframe (secret-gated) -> mints short-lived token; /panel/api rate-limited
     services/
       sync.py          # Chatwoot->Twenty upsert + Twenty->Chatwoot write-back (compare-before-write)
+  tests/                          # pure-function unit tests (security, ratelimit, sync helpers)
   deploy/k8s/twenty-bridge.yaml   # namespace, own Postgres, Deployment, Service, Ingress(/panel + /webhooks/twenty)
+  deploy/k8s/networkpolicy.yaml   # PLAT-2 default-deny ingress + allows (NOT auto-applied — see below)
   scripts/                        # k8s_create_secret.sh, deploy_local_k3s.sh, smoke_port_forward.sh
   deploy.sh                       # operator entry point (WinSCP -> bash deploy.sh)
   Dockerfile  pyproject.toml  .env.example
+```
+
+## Tests
+
+Pure-function unit tests (no DB/HTTP) under `tests/` — run from the bridge dir:
+
+```bash
+python -m pytest -q        # 19 tests: panel-token, freshness, HMAC schemes, rate limiter, sync helpers
 ```
 
 ## Deploy (operator, WinSCP + PuTTY)
@@ -184,4 +210,25 @@ Postgres dump + the encrypted k8s Secret:
    `kubectl -n twenty exec deploy/twenty-server -- curl -sk -o /dev/null -w '%{http_code}\n' https://bridge.saldo.chat/panel`
    → expect `403` (reached the bridge, secret rejected) — anything other than a
    connection error means the hairpin works and the webhook will be delivered.
+
+## NetworkPolicy (PLAT-2, operator — apply + verify, NOT auto-applied)
+
+`deploy.sh` applies only `twenty-bridge.yaml`. The PLAT-2 NetworkPolicy is a **separate** manifest
+because wrong selectors (or a CNI probe quirk) would break the LIVE webhook path. Apply explicitly
+and verify nothing broke:
+
+```bash
+cd /root/twenty-bridge
+kubectl apply -f deploy/k8s/networkpolicy.yaml
+kubectl -n twenty-bridge get pods            # must stay Ready (kubelet probes still pass)
+# Then confirm the live paths still work:
+#  - trigger a Chatwoot contact_updated  -> expect contact_synced in the bridge logs
+#  - open the panel in a Chatwoot conversation -> card loads
+#  - hairpin check above still returns 403
+```
+
+Rollback if anything regresses: `kubectl -n twenty-bridge delete -f deploy/k8s/networkpolicy.yaml`.
+The policy is default-deny ingress + allows for Traefik (kube-system), the `chatwoot` namespace
+(internal webhook), and api→postgres. k3s enforces NetworkPolicy via its bundled kube-router
+(unless started with `--disable-network-policy`).
 

@@ -70,8 +70,10 @@ def _company_name_from_email(email: str) -> str | None:
     # "no fake bucket" decision in the company-source design).
     if "@" not in email:
         return None
-    domain = email.rsplit("@", 1)[1].strip().lower()
-    if not domain or domain in FREE_EMAIL_DOMAINS:
+    local, _, domain = email.rpartition("@")
+    domain = domain.strip().lower()
+    # An empty local part (e.g. "@acme.com") is malformed -> no company.
+    if not local.strip() or not domain or domain in FREE_EMAIL_DOMAINS:
         return None
     label = _registrable_label(domain)
     return label.capitalize() if label else None
@@ -146,17 +148,24 @@ def _person_link_url(person: dict[str, Any] | None, field: str) -> str:
     return val.get("primaryLinkUrl") or "" if isinstance(val, dict) else ""
 
 
+def _full_name(name_obj: dict[str, Any]) -> str:
+    first = (name_obj.get("firstName") or "").strip()
+    last = (name_obj.get("lastName") or "").strip()
+    return f"{first} {last}".strip()
+
+
 def _core_matches(person: dict[str, Any], desired: dict[str, Any]) -> bool:
     # True when the fields the bridge manages already equal the desired values, so
     # we can skip the PATCH. Compare ONLY the sub-fields we set (Twenty returns many
     # more), and only those present in `desired` — avoids needless writes that would
     # otherwise echo back as a Twenty webhook once direction B is live.
-    p_name = person.get("name") or {}
-    d_name = desired.get("name") or {}
-    if (p_name.get("firstName") or "") != (d_name.get("firstName") or ""):
-        return False
-    if (p_name.get("lastName") or "") != (d_name.get("lastName") or ""):
-        return False
+    if "name" in desired:
+        p_name = person.get("name") or {}
+        d_name = desired["name"] or {}
+        if (p_name.get("firstName") or "") != (d_name.get("firstName") or ""):
+            return False
+        if (p_name.get("lastName") or "") != (d_name.get("lastName") or ""):
+            return False
     if "emails" in desired:
         if ((person.get("emails") or {}).get("primaryEmail") or "") != desired["emails"]["primaryEmail"]:
             return False
@@ -205,27 +214,37 @@ async def sync_contact_to_twenty(event: str, payload: dict[str, Any]) -> str | N
                       chatwoot_contact_id=chatwoot_contact_id, company=company_name)
     company_id = await _upsert_company(company_name)
 
-    # Resolve the Twenty person: own mapping first, else best-effort email dedup.
-    mapped_id = await db.get_twenty_person_id(chatwoot_contact_id)
-    if not mapped_id:
-        email = contact.get("email") or ""
-        mapped_id = await twenty.find_person_id_by_email(email) if email else None
-
+    # Resolve-or-create the Twenty person under a per-contact advisory lock so two
+    # concurrent webhooks for the same contact can't each create a duplicate Person.
     person: dict[str, Any] | None = None
-    if mapped_id:
-        desired = build_person_payload(contact, company_id, False)
-        person = await twenty.get_person(mapped_id)
-        # Skip the write when nothing the bridge manages changed (anti-echo). If the
-        # record can't be read, fall back to the old unconditional update so a stale
-        # mapping still surfaces as a 404 rather than silently diverging.
-        if person is None or not _core_matches(person, desired):
-            await twenty.update_person(mapped_id, desired)
-        person_id = mapped_id
-        action = "updated"
-    else:
-        person_id = await twenty.create_person(build_person_payload(contact, company_id, True))
-        action = "created"
-    await db.set_twenty_person_id(chatwoot_contact_id, person_id)
+    async with db.contact_lock(chatwoot_contact_id):
+        # Own mapping first, else best-effort email dedup (re-checked inside the lock
+        # so a Person created by a racing webhook is seen here instead of duplicated).
+        mapped_id = await db.get_twenty_person_id(chatwoot_contact_id)
+        if not mapped_id:
+            email = contact.get("email") or ""
+            mapped_id = await twenty.find_person_id_by_email(email) if email else None
+
+        if mapped_id:
+            desired = build_person_payload(contact, company_id, False)
+            person = await twenty.get_person(mapped_id)
+            # Preserve a human-refined first/last split in Twenty: Chatwoot has a single
+            # `name`, so our naive split can differ from how a manager fixed the split in
+            # Twenty. If the JOINED full name already matches, drop `name` from the patch
+            # so we don't clobber that split on every contact_updated (P2-1).
+            if person is not None and _full_name(person.get("name") or {}) == _full_name(desired.get("name") or {}):
+                desired.pop("name", None)
+            # Skip the write when nothing the bridge manages changed (anti-echo). If the
+            # record can't be read, fall back to the old unconditional update so a stale
+            # mapping still surfaces as a 404 rather than silently diverging.
+            if person is None or not _core_matches(person, desired):
+                await twenty.update_person(mapped_id, desired)
+            person_id = mapped_id
+            action = "updated"
+        else:
+            person_id = await twenty.create_person(build_person_payload(contact, company_id, True))
+            action = "created"
+        await db.set_twenty_person_id(chatwoot_contact_id, person_id)
 
     # Put a clickable Chatwoot link on the Twenty card → the contact's most recent
     # conversation (fallback: the contact page). Best-effort; skip if already set to
@@ -249,10 +268,7 @@ async def sync_contact_to_twenty(event: str, payload: dict[str, Any]) -> str | N
 # --- direction B: Twenty Person -> Chatwoot contact (write-back) ---
 
 def _person_full_name(record: dict[str, Any]) -> str:
-    name = record.get("name") or {}
-    first = (name.get("firstName") or "").strip()
-    last = (name.get("lastName") or "").strip()
-    return f"{first} {last}".strip()
+    return _full_name(record.get("name") or {})
 
 
 async def sync_person_to_chatwoot(record: dict[str, Any]) -> int | None:

@@ -3,6 +3,9 @@
 # own state — it does not touch the Chatwoot or Twenty databases.
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator
+
 import asyncpg
 
 _pool: asyncpg.Pool | None = None
@@ -59,6 +62,22 @@ def _require_pool() -> asyncpg.Pool:
 async def ping() -> bool:
     async with _require_pool().acquire() as conn:
         return await conn.fetchval("SELECT 1") == 1
+
+
+@contextlib.asynccontextmanager
+async def contact_lock(chatwoot_contact_id: int) -> AsyncIterator[None]:
+    # Session-level Postgres advisory lock that serializes the read-then-create of a
+    # Twenty Person for ONE Chatwoot contact. Two near-simultaneous webhooks for the
+    # same contact (e.g. contact_created + conversation_created) would otherwise both
+    # find no mapping and each create a Person — a duplicate. The lock is keyed by the
+    # bigint contact id (its own advisory keyspace; nothing else uses it) and held on
+    # a dedicated pool connection for the critical section only.
+    async with _require_pool().acquire() as conn:
+        await conn.execute("SELECT pg_advisory_lock($1)", chatwoot_contact_id)
+        try:
+            yield
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", chatwoot_contact_id)
 
 
 # --- contact mapping ---

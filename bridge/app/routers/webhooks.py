@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Request, Response
 
 from app.config import get_settings
-from app.security import verify_chatwoot_signature, verify_twenty_signature
+from app.security import timestamp_fresh_ms, verify_chatwoot_signature, verify_twenty_signature
 from app.services import sync
 from app.structured_log import log_event
 
@@ -34,8 +34,14 @@ async def chatwoot_webhook(request: Request, background: BackgroundTasks) -> Res
         if not signature or not verify_chatwoot_signature(
             settings.chatwoot_webhook_secret, timestamp, raw, signature
         ):
+            # Non-secret diagnostics so a SCHEME mismatch on first live delivery is
+            # distinguishable from a genuinely bad signature (the HMAC scheme is a
+            # cross-service contract — never change it here unilaterally; confirm the
+            # actual header/format against live Chatwoot). No secret/signature values.
             log_event(logger, "webhook_signature_invalid", "chatwoot signature missing or mismatch",
-                      level=logging.WARNING)
+                      level=logging.WARNING, direction="chatwoot",
+                      has_signature=bool(signature), has_timestamp=bool(timestamp),
+                      body_bytes=len(raw))
             return Response(status_code=401)
 
     try:
@@ -68,6 +74,9 @@ async def _safe_note_sync(body: dict) -> None:
                   level=logging.ERROR, error=str(exc))
 
 
+# The configured Twenty webhook subscribes to person.updated (canon §8C.2); we also
+# accept person.created defensively (harmless — unmapped persons are skipped, mapped
+# ones hit the anti-echo no-op) so a future subscription change can't silently drop events.
 _TWENTY_SYNCED_EVENTS = {"person.created", "person.updated"}
 
 
@@ -92,8 +101,21 @@ async def twenty_webhook(request: Request, background: BackgroundTasks) -> Respo
     if not signature or not verify_twenty_signature(
         settings.twenty_webhook_secret, timestamp, raw, signature
     ):
+        # Non-secret diagnostics (see chatwoot handler). The Twenty webhook HMAC is a
+        # cross-service contract (§8C.4b) — confirm format against live Twenty, never
+        # change the scheme here unilaterally. No secret/signature values logged.
         log_event(logger, "webhook_signature_invalid", "twenty signature missing or mismatch",
-                  level=logging.WARNING)
+                  level=logging.WARNING, direction="twenty",
+                  has_signature=bool(signature), has_timestamp=bool(timestamp),
+                  body_bytes=len(raw))
+        return Response(status_code=401)
+
+    # Replay/freshness guard (additive, default-disabled via max_age=0). The signed
+    # timestamp makes a replayed valid request detectable by its stale age.
+    max_age = settings.twenty_webhook_max_age_seconds
+    if max_age > 0 and not timestamp_fresh_ms(timestamp, max_age):
+        log_event(logger, "webhook_timestamp_stale", "twenty webhook outside freshness window",
+                  level=logging.WARNING, direction="twenty", max_age_seconds=max_age)
         return Response(status_code=401)
 
     try:

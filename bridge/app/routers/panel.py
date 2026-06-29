@@ -1,34 +1,81 @@
 # Dashboard App panel: a small HTML page Chatwoot embeds as an iframe in the
 # conversation view, plus a JSON endpoint it calls. The Twenty API key stays
 # server-side here — the browser never sees it. This is the ONLY publicly exposed
-# part of the bridge (Traefik ingress routes /panel only); access is gated by a
-# shared secret carried in the Dashboard App URL.
+# part of the bridge (Traefik ingress routes /panel only). The page entry
+# (/panel) is gated by the shared secret in the Dashboard App URL; the page then
+# mints a short-lived token so the JSON endpoint (/panel/api) is called with the
+# token, not the durable secret. The API endpoint is also per-IP rate-limited to
+# blunt id-enumeration.
 from __future__ import annotations
 
+import hmac
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app import db, deps
 from app.config import get_settings
+from app.ratelimit import RateLimiter
+from app.security import mint_panel_token, verify_panel_token
 from app.structured_log import log_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Single-replica Deployment, so a process-local limiter is enough. Built lazily
+# from config on first use (settings are lru_cached).
+_rate_limiter: RateLimiter | None = None
+
+
+def _limiter() -> RateLimiter:
+    global _rate_limiter
+    if _rate_limiter is None:
+        _rate_limiter = RateLimiter(get_settings().panel_rate_limit_per_minute, 60.0)
+    return _rate_limiter
+
+
+def _client_key(request: Request) -> str:
+    # Behind Traefik the real client is the first hop of X-Forwarded-For.
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
 
 def _check_secret(secret: str) -> None:
-    # Fail-closed: the panel is the ONLY public surface, so a missing/blank expected
-    # secret must NOT disable the gate (config makes panel_shared_secret required).
+    # Page entry gate (/panel). Fail-closed: the panel is the ONLY public surface,
+    # so a missing/blank expected secret must NOT disable the gate (config makes
+    # panel_shared_secret required). Constant-time compare to avoid leaking the
+    # secret via response timing.
     expected = get_settings().panel_shared_secret
-    if not expected or secret != expected:
+    if not expected or not secret or not hmac.compare_digest(secret, expected):
         raise HTTPException(status_code=403, detail="forbidden")
 
 
+def _check_api_auth(token: str, secret: str) -> None:
+    # API gate (/panel/api). Prefer the short-lived page token; accept the static
+    # secret only as a fallback (e.g. an iframe page cached before this rollout).
+    # Both checks are constant-time and fail-closed.
+    expected = get_settings().panel_shared_secret
+    if not expected:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if token and verify_panel_token(expected, token):
+        return
+    if secret and hmac.compare_digest(secret, expected):
+        return
+    raise HTTPException(status_code=403, detail="forbidden")
+
+
 @router.get("/panel/api/contact/{chatwoot_contact_id}")
-async def panel_contact(chatwoot_contact_id: int, secret: str = Query(default="")) -> JSONResponse:
-    _check_secret(secret)
+async def panel_contact(request: Request, chatwoot_contact_id: int,
+                        token: str = Query(default=""),
+                        secret: str = Query(default="")) -> JSONResponse:
+    if not _limiter().allow(_client_key(request)):
+        log_event(logger, "panel_rate_limited", "panel api rate limit hit",
+                  level=logging.WARNING, client=_client_key(request))
+        raise HTTPException(status_code=429, detail="too many requests")
+    _check_api_auth(token, secret)
     twenty_person_id = await db.get_twenty_person_id(chatwoot_contact_id)
     if not twenty_person_id:
         return JSONResponse({"linked": False})
@@ -56,13 +103,15 @@ async def panel_contact(chatwoot_contact_id: int, secret: str = Query(default=""
 
 @router.get("/panel", response_class=HTMLResponse)
 async def panel_page(secret: str = Query(default="")) -> HTMLResponse:
-    # Require a valid secret BEFORE serving the page, and echo back ONLY the
-    # caller-supplied secret — never fall back to the configured secret, or an
-    # unauthenticated GET /panel would leak it into the page source.
+    # Require a valid secret BEFORE serving the page. Then mint a SHORT-LIVED token
+    # (signed with the same secret) and embed THAT — never the durable secret — so
+    # the secret stops riding in the API calls / Referer / browser history.
     _check_secret(secret)
+    settings = get_settings()
+    token = mint_panel_token(settings.panel_shared_secret, settings.panel_token_ttl_seconds)
     # The page listens for Chatwoot's postMessage (appContext) to learn the current
     # contact id, then fetches the CRM card from this service.
-    html = _PANEL_HTML.replace("__SECRET__", secret)
+    html = _PANEL_HTML.replace("__TOKEN__", token)
     log_event(logger, "panel_served", "panel page served")
     return HTMLResponse(html)
 
@@ -72,8 +121,8 @@ _PANEL_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<!-- Never send the panel URL (which carries ?secret=) as Referer when the agent
-     clicks through to Twenty on another origin — would leak the shared secret. -->
+<!-- Never send the panel URL as Referer when the agent clicks through to Twenty on
+     another origin — the iframe entry URL carries the shared secret. -->
 <meta name="referrer" content="no-referrer" />
 <title>Twenty CRM</title>
 <style>
@@ -89,10 +138,19 @@ _PANEL_HTML = """<!doctype html>
 <body>
   <div id="root"><div class="muted">Загрузка карточки Twenty…</div></div>
 <script>
-  var SECRET = "__SECRET__";
+  var TOKEN = "__TOKEN__";
   var contactId = null;
+  var reloaded = false;
 
   function render(html) { document.getElementById("root").innerHTML = html; }
+
+  // The token expires (~30 min). If the agent leaves the panel open past that,
+  // the API returns 401/403 — re-fetch a fresh page once (the iframe entry URL
+  // carries the secret, so a reload re-mints a token).
+  function refreshOnce() {
+    if (reloaded) { render('<div class="muted">Сессия панели истекла. Обновите вкладку.</div>'); return; }
+    reloaded = true; location.reload();
+  }
 
   function field(label, value) {
     if (!value) return "";
@@ -101,9 +159,13 @@ _PANEL_HTML = """<!doctype html>
   }
 
   function load(id) {
-    fetch("/panel/api/contact/" + id + "?secret=" + encodeURIComponent(SECRET))
-      .then(function (r) { return r.json(); })
+    fetch("/panel/api/contact/" + id + "?token=" + encodeURIComponent(TOKEN))
+      .then(function (r) {
+        if (r.status === 401 || r.status === 403) { refreshOnce(); return null; }
+        return r.json();
+      })
       .then(function (d) {
+        if (!d) return;
         if (!d.linked) { render('<div class="muted">Контакт ещё не связан с Twenty.</div>'); return; }
         var name = (d.firstName + " " + d.lastName).trim() || "Без имени";
         var html = "<div class=\\"row\\"><b>" + name.replace(/</g, "&lt;") + "</b></div>";

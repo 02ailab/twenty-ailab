@@ -19,9 +19,12 @@ data:
   TWENTY_BASE_URL: "http://twenty-server.twenty.svc.cluster.local:3000"
   TWENTY_PUBLIC_URL: "https://crm.saldo.chat"
   TWENTY_CHATWOOT_FIELD: "chatwoot"
+  TWENTY_WEBHOOK_MAX_AGE_SECONDS: "0"
   NOTE_SYNC_ENABLED: "true"
   NOTE_MAX_MESSAGES: "100"
   BRIDGE_PUBLIC_URL: "https://bridge.saldo.chat"
+  PANEL_TOKEN_TTL_SECONDS: "1800"
+  PANEL_RATE_LIMIT_PER_MINUTE: "60"
   POSTGRES_HOST: "twenty-bridge-postgres"
   POSTGRES_PORT: "5432"
   POSTGRES_USER: "bridge"
@@ -52,6 +55,11 @@ spec:
     spec:
       containers:
         - name: postgres
+          # PLAT-4 digest-pin follow-up: pin this to an immutable digest so a moved
+          # `:16` tag can't change the DB image under us. Operator resolves the digest
+          # on the VPS (no registry pull available to the agent) and replaces the line:
+          #   crane digest postgres:16   # or: docker manifest inspect postgres:16
+          #   image: postgres:16@sha256:<digest>
           image: postgres:16
           imagePullPolicy: IfNotPresent
           # Run as root initially so the entrypoint can fix PGDATA perms then drop

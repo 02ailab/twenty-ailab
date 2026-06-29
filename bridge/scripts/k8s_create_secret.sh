@@ -18,10 +18,12 @@ read_env() {
   printf '%s' "${line%$'\r'}"
 }
 
-# Always required.
-required=(POSTGRES_PASSWORD PANEL_SHARED_SECRET)
-# Optional now (e.g. TWENTY_API_KEY is blocked on Twenty admin creation).
-optional=(CHATWOOT_API_TOKEN CHATWOOT_WEBHOOK_SECRET TWENTY_API_KEY TWENTY_WEBHOOK_SECRET)
+# Required set MUST match the no-default secret fields in app/config.py — otherwise
+# the pod boots with the script's blessing but crashes at startup on a missing
+# Settings field. Only TWENTY_WEBHOOK_SECRET is optional (config default ""; without
+# it direction B / /webhooks/twenty simply stays fail-closed-401, the app still boots).
+required=(POSTGRES_PASSWORD PANEL_SHARED_SECRET CHATWOOT_API_TOKEN CHATWOOT_WEBHOOK_SECRET TWENTY_API_KEY)
+optional=(TWENTY_WEBHOOK_SECRET)
 
 args=()
 for key in "${required[@]}"; do
