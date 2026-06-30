@@ -20,6 +20,9 @@ data:
   TWENTY_PUBLIC_URL: "https://crm.saldo.chat"
   TWENTY_CHATWOOT_FIELD: "chatwoot"
   TWENTY_WEBHOOK_MAX_AGE_SECONDS: "0"
+  # saldoClientId (F1): OFF until the operator creates the NUMBER field in Twenty.
+  SALDO_CLIENT_ID_ENABLED: "false"
+  TWENTY_SALDO_CLIENT_ID_FIELD: "saldoClientId"
   NOTE_SYNC_ENABLED: "true"
   NOTE_MAX_MESSAGES: "100"
   BRIDGE_PUBLIC_URL: "https://bridge.saldo.chat"

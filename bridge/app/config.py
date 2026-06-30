@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # -> Person, type "Links"); the bridge only populates it, best-effort.
     twenty_chatwoot_field: str = "chatwoot"
 
+    # --- saldoClientId (cross-service client number; Twenty = authority) ---
+    # Per-client number AAAA (4 digits, from 2000) assigned ONCE when the bridge first
+    # creates a Person. Feature flag OFF until the operator creates the NUMBER field in
+    # Twenty (Settings -> Data model -> Person) and flips this on — with it off the bridge
+    # never reads/writes the field, so shipping the code before the field exists is safe.
+    saldo_client_id_enabled: bool = False
+    # API name of the Person NUMBER field holding the saldoClientId.
+    twenty_saldo_client_id_field: str = "saldoClientId"
+
     # --- Notes (Chatwoot conversation -> Twenty Note) ---
     # On a Chatwoot conversation resolve, write the transcript to a Twenty Note on
     # the contact's Person (one note per conversation, body refreshed each resolve).

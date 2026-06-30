@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS note_map (
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- saldoClientId allocator: the per-client number AAAA (from 2000) assigned once per
+-- Person at creation. A real SEQUENCE makes nextval atomic, so concurrent Person
+-- creations for different contacts never get the same number. Gaps are fine
+-- (uniqueness and monotonicity matter, contiguity does not).
+CREATE SEQUENCE IF NOT EXISTS saldo_client_id_seq START WITH 2000 INCREMENT BY 1 MINVALUE 2000;
 """
 
 
@@ -62,6 +68,13 @@ def _require_pool() -> asyncpg.Pool:
 async def ping() -> bool:
     async with _require_pool().acquire() as conn:
         return await conn.fetchval("SELECT 1") == 1
+
+
+async def next_saldo_client_id() -> int:
+    # Atomic allocation of the next client number (AAAA, from 2000). nextval is safe
+    # under concurrency, so no extra lock is needed for the number itself.
+    async with _require_pool().acquire() as conn:
+        return int(await conn.fetchval("SELECT nextval('saldo_client_id_seq')"))
 
 
 @contextlib.asynccontextmanager

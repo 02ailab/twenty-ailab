@@ -115,6 +115,20 @@ class TwentyClient:
         resp.raise_for_status()
         return self._extract_record(resp.json(), "person")
 
+    async def set_person_field(self, person_id: str, field_name: str, value: Any) -> bool:
+        # Tolerant single-field PATCH (e.g. saldoClientId). The custom field may not
+        # exist yet (the operator creates it once), so a 400/404 must NOT fail the whole
+        # contact sync — log and move on, like set_person_link.
+        try:
+            resp = await self._client.patch(f"/rest/people/{person_id}", json={field_name: value})
+            resp.raise_for_status()
+            return True
+        except httpx.HTTPError as exc:  # field missing/transport — non-fatal
+            log_event(logger, "twenty_field_set_failed",
+                      "could not set person field (does it exist in Twenty?)",
+                      level=logging.WARNING, field=field_name, error=str(exc))
+            return False
+
     # --- companies ---
 
     async def find_company_id_by_name(self, name: str) -> str | None:

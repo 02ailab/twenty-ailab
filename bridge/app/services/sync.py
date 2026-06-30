@@ -154,6 +154,21 @@ def _full_name(name_obj: dict[str, Any]) -> str:
     return f"{first} {last}".strip()
 
 
+def _is_blank(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _should_assign_saldo_client_id(action: str, person: dict[str, Any] | None, field_name: str) -> bool:
+    # Assign the client number once: always on creation, and on update only when an
+    # existing Person still lacks it (e.g. it was created before the feature was enabled).
+    # Never reassign a present value — saldoClientId is a stable client key. If the record
+    # couldn't be read on update (person is None) we don't allocate, to avoid burning a
+    # number on a stale/404 mapping.
+    if action == "created":
+        return True
+    return person is not None and _is_blank(person.get(field_name))
+
+
 def _core_matches(person: dict[str, Any], desired: dict[str, Any]) -> bool:
     # True when the fields the bridge manages already equal the desired values, so
     # we can skip the PATCH. Compare ONLY the sub-fields we set (Twenty returns many
@@ -245,6 +260,20 @@ async def sync_contact_to_twenty(event: str, payload: dict[str, Any]) -> str | N
             person_id = await twenty.create_person(build_person_payload(contact, company_id, True))
             action = "created"
         await db.set_twenty_person_id(chatwoot_contact_id, person_id)
+
+        # Assign the saldoClientId once (Twenty is the authority of record; the bridge is
+        # the atomic allocator). Inside the lock so two webhooks for this contact can't
+        # double-assign. The direct payload never carries this field (no echo loop).
+        if settings.saldo_client_id_enabled and _should_assign_saldo_client_id(
+            action, person, settings.twenty_saldo_client_id_field
+        ):
+            new_saldo_id = await db.next_saldo_client_id()
+            if await twenty.set_person_field(
+                person_id, settings.twenty_saldo_client_id_field, new_saldo_id
+            ):
+                log_event(logger, "saldo_client_id_assigned", "assigned saldoClientId to person",
+                          chatwoot_contact_id=chatwoot_contact_id, twenty_person_id=person_id,
+                          saldo_client_id=new_saldo_id)
 
     # Put a clickable Chatwoot link on the Twenty card → the contact's most recent
     # conversation (fallback: the contact page). Best-effort; skip if already set to

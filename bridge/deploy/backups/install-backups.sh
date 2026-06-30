@@ -14,11 +14,16 @@ echo "==> Directory layout"
 mkdir -p "$BIN" "$ROOT/_offsite" "$ROOT/twenty-bridge/db" "$ROOT/twenty-bridge/secrets"
 chmod -R 700 "$ROOT"
 
-echo "==> Scripts -> $BIN"
-install -m 700 "$SRC/backup-twenty-bridge.sh" "$BIN/backup-twenty-bridge.sh"
-install -m 700 "$SRC/offsite-sync.sh"         "$BIN/offsite-sync.sh"
+echo "==> Normalize CRLF (WinSCP) + install scripts -> $BIN"
+for f in backup-twenty-bridge.sh offsite-sync.sh; do
+  sed -i 's/\r$//' "$SRC/$f" 2>/dev/null || true
+  install -m 700 "$SRC/$f" "$BIN/$f"
+done
 
 echo "==> Cron -> /etc/cron.d/saldo-backups"
+# A CRLF in /etc/cron.d/* makes cron silently ignore the file (the \r corrupts the
+# command) — the bridge backup then never fires (P2-11). Strip it before installing.
+sed -i 's/\r$//' "$SRC/saldo-backups.cron" 2>/dev/null || true
 install -m 644 "$SRC/saldo-backups.cron" /etc/cron.d/saldo-backups
 
 echo "==> age recipient check"

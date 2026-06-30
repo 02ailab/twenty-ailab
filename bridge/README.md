@@ -242,6 +242,22 @@ Twenty CRM itself (the `twenty-db` Postgres holding **client CRM data**) is back
    → expect `403` (reached the bridge, secret rejected) — anything other than a
    connection error means the hairpin works and the webhook will be delivered.
 
+### saldoClientId field (F1) — enable when ready
+
+The bridge assigns a per-client number `saldoClientId` (AAAA, from 2000) once when it first
+creates a Person (Twenty is the authority of record; the bridge allocates from a Postgres
+sequence — there is no native Twenty autonumber). It is **off by default**. To enable:
+
+1. **Person "Number" field** (Settings → Data model → Person → add field) → type **Number**,
+   API name `saldoClientId` (must match `TWENTY_SALDO_CLIENT_ID_FIELD`).
+2. Set `SALDO_CLIENT_ID_ENABLED=true` in `.env` and run a full `bash deploy.sh`.
+
+With the flag off, the bridge never touches the field, so deploying the code before the field
+exists is safe. Once on, new Persons get a unique increasing number; a Person created earlier is
+backfilled on its next sync. The forward identity payload never carries this field (no echo loop).
+Reverse-sync of the number into Chatwoot `identifier` (**F2**) is held pending an orchestrator
+decision on the Chatwoot identifier/merge contract.
+
 ## NetworkPolicy (PLAT-2, operator — apply + verify, NOT auto-applied)
 
 `deploy.sh` applies only `twenty-bridge.yaml`. The PLAT-2 NetworkPolicy is a **separate** manifest

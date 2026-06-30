@@ -18,6 +18,21 @@ def test_company_from_free_or_malformed_email_is_none():
 def test_registrable_label_multi_part_tld():
     assert sync._registrable_label("acme.co.uk") == "acme"
     assert sync._registrable_label("foo.bar.com.br") == "bar"
+
+
+def test_should_assign_saldo_client_id():
+    FIELD = "saldoClientId"
+    # created -> always assign (record may be None: it's brand new)
+    assert sync._should_assign_saldo_client_id("created", None, FIELD) is True
+    assert sync._should_assign_saldo_client_id("created", {}, FIELD) is True
+    # updated + existing record already has a number -> never reassign (stable key)
+    assert sync._should_assign_saldo_client_id("updated", {FIELD: 2000}, FIELD) is False
+    # updated + existing record lacks it (created before feature) -> backfill
+    assert sync._should_assign_saldo_client_id("updated", {FIELD: None}, FIELD) is True
+    assert sync._should_assign_saldo_client_id("updated", {FIELD: ""}, FIELD) is True
+    assert sync._should_assign_saldo_client_id("updated", {}, FIELD) is True
+    # updated but record unreadable (None) -> don't allocate (avoid burning a number)
+    assert sync._should_assign_saldo_client_id("updated", None, FIELD) is False
     assert sync._registrable_label("acme.com") == "acme"
     assert sync._registrable_label("localhost") == ""
 
