@@ -1,6 +1,9 @@
 # Saldo platform backups — managed in bridge/deploy/backups/ (general_docs/BACKUP_STANDARD.md).
 # DO NOT edit on the server: edit the repo file and re-run install-backups.sh.
 # Format: m h dom mon dow user command. TZ = host (Europe/Moscow).
+# cron runs with a minimal PATH; k3s puts `kubectl` in /usr/local/bin, so without this
+# the backup dies on `kubectl: command not found`. Keep it durable here, not live-patched.
+PATH=/usr/local/bin:/usr/bin:/bin
 0 3 * * *  root  /root/backups/bin/backup-twenty-bridge.sh >> /root/backups/bin/backup.log 2>&1
 0 4 * * 0  root  /root/backups/bin/offsite-sync.sh         >> /root/backups/bin/backup.log 2>&1
 # (as other services are standardized, add their backup-<svc>.sh lines here at 03:1x)

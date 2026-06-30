@@ -2,4 +2,7 @@
 # DO NOT edit on the server: edit the repo file and re-run install-backups-twenty.sh.
 # Own cron file (/etc/cron.d/saldo-backups-twenty) so per-service installers never clobber
 # each other's lines. Format: m h dom mon dow user command. TZ = host (Europe/Moscow).
+# cron runs with a minimal PATH; k3s puts `kubectl` in /usr/local/bin, so without this
+# the backup dies on `kubectl: command not found`. Keep it durable here, not live-patched.
+PATH=/usr/local/bin:/usr/bin:/bin
 20 3 * * *  root  /root/backups/bin/backup-twenty.sh >> /root/backups/bin/backup.log 2>&1
