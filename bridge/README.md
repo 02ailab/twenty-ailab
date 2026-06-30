@@ -255,8 +255,11 @@ sequence — there is no native Twenty autonumber). It is **off by default**. To
 With the flag off, the bridge never touches the field, so deploying the code before the field
 exists is safe. Once on, new Persons get a unique increasing number; a Person created earlier is
 backfilled on its next sync. The forward identity payload never carries this field (no echo loop).
-Reverse-sync of the number into Chatwoot `identifier` (**F2**) is held pending an orchestrator
-decision on the Chatwoot identifier/merge contract.
+
+The same flag also enables **reverse-sync (F2)**: on a Twenty person webhook the bridge pushes the
+number into the Chatwoot contact's `identifier` (own sub-patch, anti-clobber, and tolerant of a
+per-account uniqueness clash — logged `chatwoot_identifier_conflict` and skipped). It's a flat set,
+not a merge; the web↔Telegram merge happens on the Chatwoot widget side.
 
 ## NetworkPolicy (PLAT-2, operator — apply + verify, NOT auto-applied)
 

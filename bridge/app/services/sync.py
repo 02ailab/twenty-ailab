@@ -169,6 +169,22 @@ def _should_assign_saldo_client_id(action: str, person: dict[str, Any] | None, f
     return person is not None and _is_blank(person.get(field_name))
 
 
+def _saldo_identifier(record: dict[str, Any], field_name: str, enabled: bool) -> str | None:
+    # The AAAA value to push into Chatwoot's `identifier` on reverse sync (F2). Off when
+    # the feature is disabled or the Person has no number yet. Normalize to a plain digit
+    # string (2000 / 2000.0 / "2000" -> "2000"); a non-numeric value yields None so we
+    # never write garbage into the unique identifier field.
+    if not enabled:
+        return None
+    val = record.get(field_name)
+    if val is None or val == "":
+        return None
+    try:
+        return str(int(val))
+    except (TypeError, ValueError):
+        return None
+
+
 def _core_matches(person: dict[str, Any], desired: dict[str, Any]) -> bool:
     # True when the fields the bridge manages already equal the desired values, so
     # we can skip the PATCH. Compare ONLY the sub-fields we set (Twenty returns many
@@ -319,16 +335,23 @@ async def sync_person_to_chatwoot(record: dict[str, Any]) -> int | None:
     name = _person_full_name(record)
     email = (record.get("emails") or {}).get("primaryEmail") or ""
     phone = (record.get("phones") or {}).get("primaryPhoneNumber") or ""
+    settings = get_settings()
+    # F2: also carry saldoClientId into Chatwoot's `identifier` (AAAA). Flag-gated; the
+    # forward sync still never writes saldoClientId to Twenty, so this is the only carrier
+    # of AAAA in the Twenty->Chatwoot direction (no echo loop).
+    identifier = _saldo_identifier(record, settings.twenty_saldo_client_id_field,
+                                   settings.saldo_client_id_enabled)
 
     wrote = await deps.require_chatwoot().update_identity_fields(
         chatwoot_contact_id,
         name=name or None,
         email=email or None,
         phone=phone or None,
+        identifier=identifier,
     )
     log_event(logger, "person_synced_to_chatwoot", "twenty person synced to Chatwoot",
               twenty_person_id=str(person_id), chatwoot_contact_id=chatwoot_contact_id,
-              wrote=wrote)
+              wrote=wrote, saldo_client_id=identifier)
     return chatwoot_contact_id
 
 

@@ -33,6 +33,22 @@ def test_should_assign_saldo_client_id():
     assert sync._should_assign_saldo_client_id("updated", {}, FIELD) is True
     # updated but record unreadable (None) -> don't allocate (avoid burning a number)
     assert sync._should_assign_saldo_client_id("updated", None, FIELD) is False
+
+
+def test_saldo_identifier():
+    FIELD = "saldoClientId"
+    # disabled -> never produce an identifier
+    assert sync._saldo_identifier({FIELD: 2000}, FIELD, False) is None
+    # numeric forms all normalize to a plain digit string
+    assert sync._saldo_identifier({FIELD: 2000}, FIELD, True) == "2000"
+    assert sync._saldo_identifier({FIELD: 2000.0}, FIELD, True) == "2000"
+    assert sync._saldo_identifier({FIELD: "2001"}, FIELD, True) == "2001"
+    # absent / blank -> None
+    assert sync._saldo_identifier({}, FIELD, True) is None
+    assert sync._saldo_identifier({FIELD: None}, FIELD, True) is None
+    assert sync._saldo_identifier({FIELD: ""}, FIELD, True) is None
+    # non-numeric junk -> None (never write garbage into the unique field)
+    assert sync._saldo_identifier({FIELD: "abc"}, FIELD, True) is None
     assert sync._registrable_label("acme.com") == "acme"
     assert sync._registrable_label("localhost") == ""
 

@@ -113,7 +113,8 @@ class ChatwootClient:
         return collected
 
     async def update_identity_fields(self, contact_id: int, *, name: str | None = None,
-                                     email: str | None = None, phone: str | None = None) -> bool:
+                                     email: str | None = None, phone: str | None = None,
+                                     identifier: str | None = None) -> bool:
         # Direction B write-back: push Twenty's basic identity onto the native
         # Chatwoot contact. Read-compare-write so an unchanged value produces NO
         # PATCH — this is what stops the Chatwoot<->Twenty echo loop. A None field
@@ -129,10 +130,28 @@ class ChatwootClient:
             patch["email"] = email
         if phone and (current.get("phone_number") or "") != phone:
             patch["phone_number"] = phone
-        if not patch:
-            return False
-        await self.update_contact(contact_id, patch)
-        return True
+        wrote = False
+        if patch:
+            await self.update_contact(contact_id, patch)
+            wrote = True
+        # identifier (saldoClientId, F2) goes in its OWN patch so a per-account uniqueness
+        # clash can't drop the name/email/phone write. It's a flat SET on the mapped contact
+        # (no merge here — WS3 web<->Telegram merge lives on the Chatwoot widget side, per the
+        # orchestrator's identifier contract). identifier is UNIQUE per account, so tolerate a
+        # RecordNotUnique (409/422) by logging + skipping rather than crashing the reverse sync.
+        if identifier and (current.get("identifier") or "") != identifier:
+            try:
+                await self.update_contact(contact_id, {"identifier": identifier})
+                wrote = True
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code in (409, 422):
+                    log_event(logger, "chatwoot_identifier_conflict",
+                              "identifier already taken on another contact — skipped",
+                              level=logging.WARNING, contact_id=contact_id,
+                              status=exc.response.status_code)
+                else:
+                    raise
+        return wrote
 
     async def set_twenty_id(self, contact_id: int, twenty_id: str,
                             current_additional: dict[str, Any] | None) -> None:
