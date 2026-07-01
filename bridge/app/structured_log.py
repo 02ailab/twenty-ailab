@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
 SERVICE_NAME = "twenty-bridge"
+# §0.1 requires an `environment` field. Read from env (ConfigMap/.env); default to
+# production so a missing var never drops the mandatory field from the envelope.
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 
 
 class JsonFormatter(logging.Formatter):
@@ -16,6 +20,7 @@ class JsonFormatter(logging.Formatter):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname.lower(),
             "service": SERVICE_NAME,
+            "environment": ENVIRONMENT,
             "event": getattr(record, "event", record.name),
             "message": record.getMessage(),
         }

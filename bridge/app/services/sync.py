@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app import db, deps
@@ -15,6 +16,15 @@ from app.config import get_settings
 from app.structured_log import log_event
 
 logger = logging.getLogger(__name__)
+
+# Chatwoot's Custom::ContactPrivacy renders a redacted contact name as "Клиент #<n>"
+# (n = saldoClientId or contact id). This pseudonym must never overwrite the real name:
+# neither into Twenty (forward) nor back into the real Chatwoot Contact#name (reverse).
+_PSEUDONYM_NAME_RE = re.compile(r"^Клиент #\d+$")
+
+
+def _is_pseudonym_name(name: str | None) -> bool:
+    return bool(name) and bool(_PSEUDONYM_NAME_RE.match(name.strip()))
 
 # Label shown on the clickable Chatwoot link on the Twenty Person card.
 CHATWOOT_LINK_LABEL = "Открыть чат"
@@ -185,6 +195,28 @@ def _saldo_identifier(record: dict[str, Any], field_name: str, enabled: bool) ->
         return None
 
 
+def _telegram_username(contact: dict[str, Any]) -> str | None:
+    # Telegram @username lives in additional_attributes.username (Chatwoot also stores a
+    # duplicate under social_telegram_user_name). Only present on a REAL (admin) contact.
+    attrs = contact.get("additional_attributes") or {}
+    handle = (attrs.get("username") or attrs.get("social_telegram_user_name") or "")
+    handle = str(handle).strip().lstrip("@")
+    return handle or None
+
+
+def _telegram_id(contact: dict[str, Any]) -> str | None:
+    # tg-id is the source_id of the Telegram ContactInbox (numeric). The admin contact GET
+    # returns contact_inboxes; pick the first numeric source_id. Best-effort — if the shape
+    # doesn't carry it, return None (field simply stays unset).
+    for ci in contact.get("contact_inboxes") or []:
+        if not isinstance(ci, dict):
+            continue
+        src = ci.get("source_id")
+        if src is not None and str(src).lstrip("-").isdigit():
+            return str(src)
+    return None
+
+
 def _core_matches(person: dict[str, Any], desired: dict[str, Any]) -> bool:
     # True when the fields the bridge manages already equal the desired values, so
     # we can skip the PATCH. Compare ONLY the sub-fields we set (Twenty returns many
@@ -232,6 +264,16 @@ async def sync_contact_to_twenty(event: str, payload: dict[str, Any]) -> str | N
     chatwoot = deps.require_chatwoot()
     settings = get_settings()
 
+    # A1-БАГ fix + CRM-FULL: conversation_created's meta.sender is the ContactPrivacy-
+    # redacted form (name="Клиент #AAAA", email/phone nil, attrs={}). Never let it drive an
+    # identity write. Re-fetch the REAL contact via the admin API token. CRM-FULL always
+    # re-fetches so it can also read @username/tg-id. On a failed fetch we keep the payload
+    # contact but the pseudonym-guard below stops a redacted name from overwriting the real one.
+    if settings.crm_full_enabled or event == "conversation_created":
+        real = await chatwoot.get_contact(chatwoot_contact_id)
+        if real:
+            contact = real
+
     additional = contact.get("additional_attributes") or {}
     # Company name: explicit Chatwoot field first, else corporate email domain.
     # Free-provider / no email -> stays empty -> Person without a company.
@@ -256,8 +298,14 @@ async def sync_contact_to_twenty(event: str, payload: dict[str, Any]) -> str | N
             email = contact.get("email") or ""
             mapped_id = await twenty.find_person_id_by_email(email) if email else None
 
+        # A1-БАГ guard: if the (possibly still-redacted) name is a "Клиент #N" pseudonym,
+        # never send it to Twenty — leave the real name intact / empty on create.
+        name_is_pseudonym = _is_pseudonym_name(contact.get("name"))
+
         if mapped_id:
             desired = build_person_payload(contact, company_id, False)
+            if name_is_pseudonym:
+                desired.pop("name", None)
             person = await twenty.get_person(mapped_id)
             # Preserve a human-refined first/last split in Twenty: Chatwoot has a single
             # `name`, so our naive split can differ from how a manager fixed the split in
@@ -273,7 +321,10 @@ async def sync_contact_to_twenty(event: str, payload: dict[str, Any]) -> str | N
             person_id = mapped_id
             action = "updated"
         else:
-            person_id = await twenty.create_person(build_person_payload(contact, company_id, True))
+            create_payload = build_person_payload(contact, company_id, True)
+            if name_is_pseudonym:
+                create_payload["name"] = {"firstName": "", "lastName": ""}
+            person_id = await twenty.create_person(create_payload)
             action = "created"
         await db.set_twenty_person_id(chatwoot_contact_id, person_id)
 
@@ -299,6 +350,20 @@ async def sync_contact_to_twenty(event: str, payload: dict[str, Any]) -> str | N
     if _person_link_url(person, settings.twenty_chatwoot_field) != link_url:
         await twenty.set_person_link(person_id, settings.twenty_chatwoot_field,
                                      link_url, CHATWOOT_LINK_LABEL)
+
+    # CRM-FULL: enrich the admin-only card with the real Telegram identity (the real name
+    # already went in via build_person_payload above, since `contact` was re-fetched).
+    # Anti-clobbered against the current record so steady state writes nothing (and these
+    # fields are never pushed back to Chatwoot -> no echo loop).
+    if settings.crm_full_enabled:
+        wrote_tg = False
+        for field, value in ((settings.twenty_telegram_username_field, _telegram_username(contact)),
+                             (settings.twenty_telegram_id_field, _telegram_id(contact))):
+            if value and ((person or {}).get(field) or None) != value:
+                wrote_tg = await twenty.set_person_field(person_id, field, value) or wrote_tg
+        if wrote_tg:
+            log_event(logger, "crm_full_enriched", "wrote Telegram identity to Twenty person",
+                      chatwoot_contact_id=chatwoot_contact_id, twenty_person_id=person_id)
 
     # Write the Twenty id back onto the Chatwoot contact (merge, skip if unchanged).
     await chatwoot.set_twenty_id(chatwoot_contact_id, person_id, additional)
@@ -333,6 +398,15 @@ async def sync_person_to_chatwoot(record: dict[str, Any]) -> int | None:
         return None
 
     name = _person_full_name(record)
+    # A1-БАГ (reverse guard): NEVER write a "Клиент #N" pseudonym back onto the real
+    # Chatwoot Contact#name. The bridge token is admin, so ContactPrivacy.preserve() would
+    # let it through and permanently overwrite the client's real name in Chatwoot's DB.
+    if _is_pseudonym_name(name):
+        log_event(logger, "reverse_name_pseudonym_skipped",
+                  "refused to write a Клиент #N pseudonym back to Chatwoot name",
+                  level=logging.WARNING, twenty_person_id=str(person_id),
+                  chatwoot_contact_id=chatwoot_contact_id)
+        name = ""
     email = (record.get("emails") or {}).get("primaryEmail") or ""
     phone = (record.get("phones") or {}).get("primaryPhoneNumber") or ""
     settings = get_settings()

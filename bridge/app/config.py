@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     # API name of the Person NUMBER field holding the saldoClientId.
     twenty_saldo_client_id_field: str = "saldoClientId"
 
+    # --- CRM-FULL (admin-only Twenty gets the full client card) ---
+    # Twenty is admin-only, so anonymization there is counterproductive: enrich the Person
+    # with the real Telegram identity. OFF until the operator creates the two TEXT fields.
+    crm_full_enabled: bool = False
+    # API names of the Person TEXT fields for the Telegram identity.
+    twenty_telegram_username_field: str = "telegramUsername"
+    twenty_telegram_id_field: str = "telegramId"
+
     # --- Notes (Chatwoot conversation -> Twenty Note) ---
     # On a Chatwoot conversation resolve, write the transcript to a Twenty Note on
     # the contact's Person (one note per conversation, body refreshed each resolve).

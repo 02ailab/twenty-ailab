@@ -49,6 +49,44 @@ def test_saldo_identifier():
     assert sync._saldo_identifier({FIELD: ""}, FIELD, True) is None
     # non-numeric junk -> None (never write garbage into the unique field)
     assert sync._saldo_identifier({FIELD: "abc"}, FIELD, True) is None
+
+
+def test_is_pseudonym_name():
+    # ContactPrivacy redacted forms — must be recognized so they never overwrite real names.
+    assert sync._is_pseudonym_name("Клиент #2005") is True
+    assert sync._is_pseudonym_name("Клиент #10") is True
+    assert sync._is_pseudonym_name("  Клиент #7  ") is True
+    # real names / empty -> not a pseudonym
+    assert sync._is_pseudonym_name("Иван Петров") is False
+    assert sync._is_pseudonym_name("Клиент") is False
+    assert sync._is_pseudonym_name("Клиент #abc") is False
+    assert sync._is_pseudonym_name("Client #5") is False
+    assert sync._is_pseudonym_name("") is False
+    assert sync._is_pseudonym_name(None) is False
+
+
+def test_telegram_username():
+    assert sync._telegram_username({"additional_attributes": {"username": "durov"}}) == "durov"
+    assert sync._telegram_username({"additional_attributes": {"username": "@durov"}}) == "durov"
+    # falls back to the social_ duplicate
+    assert sync._telegram_username({"additional_attributes": {"social_telegram_user_name": "neo"}}) == "neo"
+    # absent / blank -> None
+    assert sync._telegram_username({"additional_attributes": {}}) is None
+    assert sync._telegram_username({}) is None
+    assert sync._telegram_username({"additional_attributes": {"username": "  "}}) is None
+
+
+def test_telegram_id():
+    contact = {"contact_inboxes": [{"source_id": "123456789"}]}
+    assert sync._telegram_id(contact) == "123456789"
+    # negative (group/channel) ids allowed
+    assert sync._telegram_id({"contact_inboxes": [{"source_id": "-100200"}]}) == "-100200"
+    # skip non-numeric source_ids (e.g. web widget uuid), take the numeric telegram one
+    mixed = {"contact_inboxes": [{"source_id": "abc-uuid"}, {"source_id": "555"}]}
+    assert sync._telegram_id(mixed) == "555"
+    # none present -> None
+    assert sync._telegram_id({"contact_inboxes": []}) is None
+    assert sync._telegram_id({}) is None
     assert sync._registrable_label("acme.com") == "acme"
     assert sync._registrable_label("localhost") == ""
 

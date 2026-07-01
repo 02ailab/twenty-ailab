@@ -23,6 +23,13 @@ data:
   # saldoClientId (F1/F2): NUMBER field created in Twenty + Chatwoot side ready (2026-06-30) -> ON.
   SALDO_CLIENT_ID_ENABLED: "true"
   TWENTY_SALDO_CLIENT_ID_FIELD: "saldoClientId"
+  # CRM-FULL: real name + Telegram identity into the admin-only card. OFF until the operator
+  # creates the two TEXT fields (telegramUsername, telegramId) on Person in Twenty.
+  CRM_FULL_ENABLED: "false"
+  TWENTY_TELEGRAM_USERNAME_FIELD: "telegramUsername"
+  TWENTY_TELEGRAM_ID_FIELD: "telegramId"
+  # §0.1 log envelope environment.
+  ENVIRONMENT: "production"
   NOTE_SYNC_ENABLED: "true"
   NOTE_MAX_MESSAGES: "100"
   BRIDGE_PUBLIC_URL: "https://bridge.saldo.chat"
